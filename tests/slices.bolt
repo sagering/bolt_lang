@@ -1,0 +1,16 @@
+
+main() : i32
+    let a : i16 = 1
+    let b : u8 = 1
+    let c : u16 = 1
+    let d : i32 = c
+    let e : i64 = a
+    let f : u32 = 1
+    let g : i64 = f
+
+    return 3
+
+
+
+
+

@@ -1,0 +1,33 @@
+
+
+
+take_u16( a : u16 ) : i32
+    return 1
+
+take_u32( a : u32 ) : i32
+    return 1
+
+take_i16( a : i16 ) : i32
+    return 1
+
+take_i32( a : i32 ) : i32
+    return 1
+
+main() : i32
+    let a : i16 = 1
+    let b : u8 = 1
+    let c : u16 = 1
+    let d : i32 = c
+    let e : i64 = a
+    let f : u32 = 1
+    let g : i64 = f
+
+    take_u16( b )
+    take_u16( c )
+    take_u32( b )
+    take_u32( c )
+    take_i16( b )
+    take_i32( b )
+    take_i32( d )
+
+    return 3

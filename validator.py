@@ -109,7 +109,7 @@ class CompleteType:
         return isinstance(self.val, Struct)
 
     def is_integer(self) -> bool:
-        return self.is_builtin() and self.builtin().name in ['i8', 'i16', 'i32', 'i64']
+        return self.is_builtin() and self.builtin().name in ['i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64']
 
     def is_function_ptr(self) -> bool:
         return isinstance(self.val, FunctionPointer)
@@ -191,6 +191,12 @@ class CompleteType:
             pass
         else:
             raise NotImplemented()
+
+    def eq_or_other_safely_convertible(self, other : 'CompleteType') -> bool:
+        if self.is_integer() and other.is_integer():
+            return check_integer_type_compatibility(self.builtin().name, other.builtin().name)
+
+        return self.eq(other)
 
     def eq(self, other: 'CompleteType') -> bool:
 
@@ -682,11 +688,52 @@ class ValidatedModule:
     def body(self) -> list[Union[ValidatedFunctionDefinition]]: return self.children
 
 
+def check_integer_type_compatibility(nominal : str, other : str) -> bool:
+    nominal_is_signed = nominal[0] == 'i'
+    nominal_size = int(nominal[1:])
+    other_is_signed = other[0] == 'i'
+    other_size = int(other[1:])
+
+    if nominal_is_signed == other_is_signed:
+        return nominal_size >= other_size
+
+    if not nominal_is_signed: return False
+
+    # nominal is signed, and other is unsigned
+    # ok cases: i16 and u8, i32 and u8 or u16, i64 and u8 or u16 or u32
+    return nominal_is_signed >= 2 * other_is_signed
+
+
 def validate_number(parsed_number: ParsedNumber) -> (ValidatedNumber | None, ValidationError | None):
     if '.' in parsed_number.value:
         return ValidatedNumber([], parsed_number.span, parsed_number.value, CompleteType(Builtin('f64'))), None
     else:
-        return ValidatedNumber([], parsed_number.span, parsed_number.value, CompleteType(Builtin('i64'))), None
+        int_value = int(parsed_number.value)
+
+        if int_value >= 0:
+            if int_value < 2 ** 8:
+                builtin_name = 'u8'
+            elif int_value < 2 ** 16:
+                builtin_name = 'u16'
+            elif int_value < 2 ** 32:
+                builtin_name = 'u32'
+            elif int_value < 2 ** 64:
+                builtin_name = 'u64'
+            else:
+                return None, ValidationError(f'integer number {parsed_number.value} too large', parsed_number.span)
+        else:
+            if int_value >= 2 ** 7:
+                builtin_name = 'i8'
+            elif int_value >= 2 ** 15:
+                builtin_name = 'i16'
+            elif int_value >= 2 ** 31:
+                builtin_name = 'i32'
+            elif int_value >= 2 ** 63:
+                builtin_name = 'i64'
+            else:
+                return None, ValidationError(f'integer number {parsed_number.value} too large', parsed_number.span)
+
+        return ValidatedNumber([], parsed_number.span, parsed_number.value, CompleteType(Builtin(builtin_name))), None
 
 
 def validate_unop(scope: Scope, parsed_unop: ParsedUnaryOperation) -> (ValidatedUnaryOperation | None, ValidationError | None):
@@ -754,7 +801,7 @@ def validate_call(scope: Scope, parsed_call: ParsedCall) -> (ValidatedCall | Non
         return None, ValidationError(f'Wrong number of arguments in call to function', parsed_call.span)
 
     for idx, (a, b) in enumerate(zip(function_ptr.pars, validated_args)):
-        if not a.eq(b.type):
+        if not a.eq_or_other_safely_convertible(b.type):
             return None, ValidationError(f'Type mismatch in {idx + 1}th argument in call to function', parsed_call.span)
 
     return ValidatedCall([validated_expr, *validated_args], parsed_call.span, function_ptr.ret), None
@@ -887,7 +934,7 @@ def validate_variable_declaration(scope: Scope, parsed_variable_decl: ParsedVari
     init_expr, error = validate_expression(scope, parsed_variable_decl.initializer)
     if error: return None, error
 
-    if not init_expr.type.eq(init_expr.type):
+    if not init_expr.type.eq_or_other_safely_convertible(init_expr.type):
         return None, ValidationError(
             f'Type mismatch in variable declaration: declaration type = {validated_type}, initialization type = {init_expr.type}', parsed_variable_decl.span)
 
@@ -1023,7 +1070,7 @@ def validate_function_definition(scope: Scope, function_definition: ParsedFuncti
     if not validate_return_stmt:
         return None, ValidationError(f'missing return in function {function_definition.name}', function_definition.span)
 
-    if not validated_return_stmt.expr().type.eq(validated_return_type):
+    if not validated_return_type.eq_or_other_safely_convertible(validated_return_stmt.expr().type):
         return None, ValidationError(f'Return type mismatch in function "{function_definition.name.value}": declared return type is {validated_return_type}, but returning expression of type {validated_return_stmt.expr().type}', function_definition.span)
 
     return ValidatedFunctionDefinition([validated_name, ValidatedReturnType([], function_definition.return_type.span, validated_return_type), validated_block, *validated_pars], function_definition.span), None
