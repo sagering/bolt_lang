@@ -242,6 +242,11 @@ def codegen_stmt(stmt: ValidatedStatement) -> str:
         for substmt in stmt.block().statements():
             out += codegen_stmt(substmt)
         out += '}\n'
+    elif isinstance(stmt, ValidatedIfStatement):
+        out += f'if ({codegen_expr(stmt.condition())}) {{\n'
+        for substmt in stmt.block().statements():
+            out += codegen_stmt(substmt)
+        out += '}\n'
     elif isinstance(stmt, ValidatedExpression):
         out += codegen_expr(stmt) + ';\n'
     else:

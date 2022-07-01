@@ -3,6 +3,9 @@ struct ABC
     b : i64
     c : i64
 
+struct E
+    e : i32
+
 use_struct ( input : *ABC ) : ABC
     let c : ABC = ABC {}
     return c
@@ -35,13 +38,14 @@ funky( c : i64 ) : i64
 
     return -1
 
-main() : i64
+main() : i32
     funky( 938 )
 
     let a : ABC = ABC{}
+    let b : E = E{}
 
     if my_function( 3 )
-        return 2
+        return b.e
 
-    return -1
+    return b.e
     
