@@ -173,7 +173,13 @@ class ParsedStructExpression:
     span : Span
 
 
-ParsedAtom = Union[ParsedName, ParsedNumber]
+@dataclass
+class ParsedArray:
+    exprs : list['ParsedExpression']
+    span : Span
+
+
+ParsedAtom = Union[ParsedName, ParsedNumber, ParsedArray]
 
 ParsedPrimaryExpression = Union[ParsedCall, ParsedIndexExpression, ParsedDotExpression, ParsedStructExpression, ParsedAtom]
 
@@ -383,6 +389,9 @@ def parse_operand(token_source: TokenSource) -> (ParsedExpression | None, Parser
 
             return ParsedUnaryOperation(operand, op, Span(start, token_source.idx())), None
 
+        case TokenKind.LeftBracket:
+            return parse_array(token_source)
+
         case _:
             return parse_primary_expr(None, token_source)
 
@@ -437,6 +446,27 @@ def parse_name(token_source : TokenSource) -> (ParsedName | None, ParserError | 
     token_span, error = token_source.try_consume_token(TokenKind.Name)
     if error: return None, error
     return ParsedName(token_span.token.data, token_span.span), None
+
+
+def parse_array(token_source: TokenSource) -> (ParsedArray | None, ParserError | None):
+    _, error = token_source.try_consume_token(TokenKind.LeftBracket)
+    if error: return None, error
+
+    exprs = []
+    start = token_source.idx()
+
+    while True:
+        expr, error = parse_expression(token_source)
+        if error: return None, error
+        exprs.append(expr)
+
+        token_span, error = token_source.try_consume_token(TokenKind.Comma)
+        if error: break
+
+    _, error = token_source.try_consume_token(TokenKind.RightBracket)
+    if error: return None, error
+
+    return ParsedArray(exprs, Span(start, token_source.idx())), None
 
 
 def parse_struct_expression(parsed_expr: ParsedPrimaryExpression, token_source: TokenSource) -> (ParsedStructExpression | None, ParserError | None):

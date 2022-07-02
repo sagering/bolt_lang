@@ -7,7 +7,7 @@ from parser import ParsedModule, ParsedFunctionDefinition, ParsedExpression, Par
     ParsedVariableDeclaration, ParsedWhile, ParsedBreakStatement, ParsedIfStatement, ParsedStruct, \
     ParsedField, ParsedType, ParsedTypeLiteral, ParsedPointerType, ParsedSliceType, ParsedArrayType, \
     ParsedStructExpression, ParsedDotExpression, ParsedPrimaryExpression, ParsedIndexExpression,\
-    print_parser_error, TokenSource, parse_module
+    ParsedArray, print_parser_error, TokenSource, parse_module
 
 from lexer import lex
 
@@ -236,7 +236,18 @@ def is_unary_operator_defined(complete_type: CompleteType, op: Operator) -> (Com
         return None
     else:
         match op:
-            case Operator.Minus | Operator.Plus:
+            case Operator.Plus:
+                return complete_type
+            case Operator.Minus:
+                if complete_type.builtin().name == 'u64':
+                    return None
+                if complete_type.builtin().name in ['u8', 'u16', 'u32']:
+                    conversion_table = {}
+                    conversion_table['u8'] = 'i16'
+                    conversion_table['u16'] = 'i32'
+                    conversion_table['u32'] = 'i64'
+                    return CompleteType(Builtin(conversion_table[complete_type.builtin().name]))
+
                 return complete_type
             case _:
                 return None
@@ -552,7 +563,7 @@ class ValidatedIndexExpression:
 
 
 ValidatedExpression = Union[
-    ValidatedNumber, ValidatedNameExpr, ValidatedUnaryOperation, ValidatedBinaryOperation, ValidatedCall, ValidatedDotExpression, ValidatedStructExpression, ValidatedIndexExpression]
+    ValidatedNumber, ValidatedNameExpr, ValidatedUnaryOperation, ValidatedBinaryOperation, ValidatedCall, ValidatedDotExpression, ValidatedStructExpression, ValidatedIndexExpression, 'ValidatedArray']
 
 
 @dataclass
@@ -704,40 +715,46 @@ def check_integer_type_compatibility(nominal : str, other : str) -> bool:
     return nominal_is_signed >= 2 * other_is_signed
 
 
-def validate_number(parsed_number: ParsedNumber) -> (ValidatedNumber | None, ValidationError | None):
+def integer_literal_too_type(literal : str) -> str | None:
+    """Returns None if the integer is too large to fit in any of the builtin integer types."""
+    int_value = int(literal)
+
+    if int_value >= 0:
+        if int_value < 2 ** 8:
+            return 'u8'
+        elif int_value < 2 ** 16:
+            return 'u16'
+        elif int_value < 2 ** 32:
+            return 'u32'
+        elif int_value < 2 ** 64:
+            return 'u64'
+        else:
+            return None
+    else:
+        if int_value >= -(2 ** 7):
+            return 'i8'
+        elif int_value >= -(2 ** 15):
+            return 'i16'
+        elif int_value >= -(2 ** 31):
+            return 'i32'
+        elif int_value >= -(2 ** 63):
+            return 'i64'
+        else:
+            return None
+
+
+def validate_number(type_hint: CompleteType | None, parsed_number: ParsedNumber) -> (ValidatedNumber | None, ValidationError | None):
     if '.' in parsed_number.value:
         return ValidatedNumber([], parsed_number.span, parsed_number.value, CompleteType(Builtin('f64'))), None
     else:
-        int_value = int(parsed_number.value)
-
-        if int_value >= 0:
-            if int_value < 2 ** 8:
-                builtin_name = 'u8'
-            elif int_value < 2 ** 16:
-                builtin_name = 'u16'
-            elif int_value < 2 ** 32:
-                builtin_name = 'u32'
-            elif int_value < 2 ** 64:
-                builtin_name = 'u64'
-            else:
-                return None, ValidationError(f'integer number {parsed_number.value} too large', parsed_number.span)
+        if builtin_name := integer_literal_too_type(parsed_number.value):
+            return ValidatedNumber([], parsed_number.span, parsed_number.value, CompleteType(Builtin(builtin_name))), None
         else:
-            if int_value >= 2 ** 7:
-                builtin_name = 'i8'
-            elif int_value >= 2 ** 15:
-                builtin_name = 'i16'
-            elif int_value >= 2 ** 31:
-                builtin_name = 'i32'
-            elif int_value >= 2 ** 63:
-                builtin_name = 'i64'
-            else:
-                return None, ValidationError(f'integer number {parsed_number.value} too large', parsed_number.span)
-
-        return ValidatedNumber([], parsed_number.span, parsed_number.value, CompleteType(Builtin(builtin_name))), None
+            return None, ValidationError(f'integer number {parsed_number.value} too large', parsed_number.span)
 
 
-def validate_unop(scope: Scope, parsed_unop: ParsedUnaryOperation) -> (ValidatedUnaryOperation | None, ValidationError | None):
-    val_expr, error = validate_expression(scope, parsed_unop.rhs)
+def validate_unop(scope: Scope, _: CompleteType | None, parsed_unop: ParsedUnaryOperation) -> (ValidatedUnaryOperation | None, ValidationError | None):
+    val_expr, error = validate_expression(scope, None, parsed_unop.rhs)
     if error: return None, error
 
     op = parsed_unop.op.op
@@ -759,17 +776,30 @@ def validate_unop(scope: Scope, parsed_unop: ParsedUnaryOperation) -> (Validated
         if not scope.find_struct(val_expr.type.struct().name):
             raise NotImplementedError('Leaving this here to confirm my hypothesis above.')
 
-    if not (type_after_unop := is_unary_operator_defined(val_expr.type, op)):
+    if isinstance(val_expr, ValidatedNumber) and op == Operator.Minus:
+        # The parser currently can only produce positive numbers. Negative numbers will be parsed as unary operation.
+        # This case is handled separately to be able to apply the knowledge of the size of the number at compile time
+        # to produce the best type, for example:
+        # A '-3' is parsed as -( u8 ) and becomes of type i16. To avoid "oversizing" (i16 instead of i8) we can apply
+        # the knowledge that the u8 is 3, and hence -3 also fits into i8.
+        integer_type_name_after_unop = integer_literal_too_type(f'-{val_expr.value}')
+
+        if not integer_type_name_after_unop:
+            return None, ValidationError(f'type {val_expr.type} does not support unary operation with operator {op}', parsed_unop.span)
+        else:
+            type_after_unop = CompleteType(Builtin(integer_type_name_after_unop))
+
+    elif not (type_after_unop := is_unary_operator_defined(val_expr.type, op)):
         return None, ValidationError(f'type {val_expr.type} does not support unary operation with operator {op}', parsed_unop.span)
 
     return ValidatedUnaryOperation([val_expr], parsed_unop.span, parsed_unop.op, type_after_unop), None
 
 
-def validate_binop(scope: Scope, parsed_binop: ParsedBinaryOperation) -> (ValidatedBinaryOperation | None, ValidationError | None):
-    lhs, error = validate_expression(scope, parsed_binop.lhs)
+def validate_binop(scope: Scope, type_hint: CompleteType | None, parsed_binop: ParsedBinaryOperation) -> (ValidatedBinaryOperation | None, ValidationError | None):
+    lhs, error = validate_expression(scope, None, parsed_binop.lhs)
     if error: return None, error
 
-    rhs, error = validate_expression(scope, parsed_binop.rhs)
+    rhs, error = validate_expression(scope, None, parsed_binop.rhs)
     if error: return None, error
 
     op = parsed_binop.op.op
@@ -781,8 +811,8 @@ def validate_binop(scope: Scope, parsed_binop: ParsedBinaryOperation) -> (Valida
     return ValidatedBinaryOperation([lhs, rhs], parsed_binop.span, parsed_binop.op, type_after_binop), None
 
 
-def validate_call(scope: Scope, parsed_call: ParsedCall) -> (ValidatedCall | None, ValidationError | None):
-    validated_expr, error = validate_expression(scope, parsed_call.expr)
+def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: ParsedCall) -> (ValidatedCall | None, ValidationError | None):
+    validated_expr, error = validate_expression(scope, None, parsed_call.expr)
     if error: return None, error
 
     if not validated_expr.type.is_function_ptr():
@@ -791,7 +821,7 @@ def validate_call(scope: Scope, parsed_call: ParsedCall) -> (ValidatedCall | Non
     validated_args: list[ValidatedExpression] = []
 
     for arg in parsed_call.args:
-        expr, error = validate_expression(scope, arg)
+        expr, error = validate_expression(scope, None, arg)
         if error: return None, error
         validated_args.append(expr)
 
@@ -807,8 +837,8 @@ def validate_call(scope: Scope, parsed_call: ParsedCall) -> (ValidatedCall | Non
     return ValidatedCall([validated_expr, *validated_args], parsed_call.span, function_ptr.ret), None
 
 
-def validate_struct_expression(scope: Scope, parsed_struct_expression: ParsedStructExpression) -> (ValidatedStructExpression | None, ValidationError | None):
-    validated_expr, error = validate_expression(scope, parsed_struct_expression.expr)
+def validate_struct_expression(scope: Scope,type_hint: CompleteType | None, parsed_struct_expression: ParsedStructExpression) -> (ValidatedStructExpression | None, ValidationError | None):
+    validated_expr, error = validate_expression(scope, None, parsed_struct_expression.expr)
     if error: return None, error
 
     if not validated_expr.type.is_namespace():
@@ -820,9 +850,9 @@ def validate_struct_expression(scope: Scope, parsed_struct_expression: ParsedStr
     return ValidatedStructExpression([validated_expr], parsed_struct_expression.span, CompleteType(struct)), None
 
 
-def validate_dot_expr(scope: Scope, parsed_dot_expr: ParsedDotExpression):
+def validate_dot_expr(scope: Scope, type_hint: CompleteType | None, parsed_dot_expr: ParsedDotExpression):
 
-    validated_expr, error = validate_expression(scope, parsed_dot_expr.expr)
+    validated_expr, error = validate_expression(scope, None, parsed_dot_expr.expr)
     if error: return None, error
 
     validated_name, error = validate_name(parsed_dot_expr.name)
@@ -856,11 +886,11 @@ def validate_dot_expr(scope: Scope, parsed_dot_expr: ParsedDotExpression):
     return None, ValidationError(f'fundamental type {dot_into.fundamental_type()} not found', parsed_dot_expr.span)
 
 
-def validate_index_expr(scope : Scope, parsed_index_expr : ParsedIndexExpression) -> (ValidatedIndexExpression | None, ValidationError | None):
-    validated_expr, error = validate_expression(scope, parsed_index_expr.expr)
+def validate_index_expr(scope : Scope, type_hint: CompleteType | None, parsed_index_expr : ParsedIndexExpression) -> (ValidatedIndexExpression | None, ValidationError | None):
+    validated_expr, error = validate_expression(scope, None, parsed_index_expr.expr)
     if error: return None, error
 
-    index, error = validate_expression(scope, parsed_index_expr.index)
+    index, error = validate_expression(scope, None, parsed_index_expr.index)
     if error: return None, error
 
     if not index.type.is_integer():
@@ -872,7 +902,7 @@ def validate_index_expr(scope : Scope, parsed_index_expr : ParsedIndexExpression
     return None, ValidationError(f'cannot index {validated_expr.type}', validated_expr.span)
 
 
-def validate_name_expr(scope: Scope, parsed_name: ParsedName) -> (ValidatedNameExpr | None, ValidationError | None):
+def validate_name_expr(scope: Scope, type_hint: CompleteType | None, parsed_name: ParsedName) -> (ValidatedNameExpr | None, ValidationError | None):
 
     if var := scope.find_var(parsed_name.value):
         return ValidatedNameExpr([], parsed_name.span, parsed_name.value, var.type), None
@@ -895,34 +925,113 @@ def validate_name_expr(scope: Scope, parsed_name: ParsedName) -> (ValidatedNameE
     return None, ValidationError(f'name {parsed_name.value} not found in scope {scope.namespace}', parsed_name.span)
 
 
-def validate_primary_expr(scope, expr : ParsedPrimaryExpression):
+def validate_primary_expr(scope, type_hint: CompleteType | None, expr : ParsedPrimaryExpression):
 
     if isinstance(expr, ParsedName):
-        return validate_name_expr(scope, expr)
+        return validate_name_expr(scope, type_hint, expr)
     if isinstance(expr, ParsedNumber):
-        return validate_number(expr)
+        return validate_number(type_hint, expr)
     if isinstance(expr, ParsedCall):
-        return validate_call(scope, expr)
+        return validate_call(scope, type_hint, expr)
     if isinstance(expr, ParsedStructExpression):
-        return validate_struct_expression(scope, expr)
+        return validate_struct_expression(scope, type_hint, expr)
     if isinstance(expr, ParsedDotExpression):
-        return validate_dot_expr(scope, expr)
+        return validate_dot_expr(scope, type_hint, expr)
     if isinstance(expr, ParsedIndexExpression):
-        return validate_index_expr(scope, expr)
+        return validate_index_expr(scope, type_hint, expr)
+    if isinstance(expr, ParsedArray):
+        return validate_array(scope, type_hint, expr)
+
+    raise NotImplementedError(expr)
 
 
-def validate_expression(scope: Scope, expr: ParsedExpression) -> (ValidatedExpression | None, ValidationError | None):
+@dataclass
+class ValidatedArray:
+    children : list[ValidatedExpression]
+    span : Span
+    type : CompleteType
+
+    def expressions(self): return self.children
+
+
+def validate_array(scope, type_hint: CompleteType | None, array: ParsedArray) -> (ValidatedArray | None, ValidationError | None):
+
+    validated_exprs : list[ValidatedExpression] = []
+    for expr in array.exprs:
+        validated_expr, error = validate_expression(scope, None, expr)
+        if error: return None, error
+        validated_exprs.append(validated_expr)
+
+    # Only want to allow safe implicit conversions between integer type. This means that we do not allow implicit
+    # conversions between floats and integers, or between any other types.
+
+    # So this means:
+    if not validated_exprs[0].type.is_integer():
+        # All expressions in the list have to have the same type, or
+        for expr in validated_exprs[1:]:
+            if not validated_exprs[0].type.eq(expr.type):
+                return None, ValidationError('unable to infer type of array', array.span)
+
+        element_type = validated_exprs[0].type
+    else:
+        # All expressions in the list have to be compatible integer types.
+
+        all_integer_types = ['u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64']
+        integer_candidates = set(all_integer_types)
+
+        integer_compatibility = {}
+
+        # TODO: A u8 could also be compatible wit a i8, if known at compile time and smaller than 127.
+        integer_compatibility['u8'] = {'u8', 'u16', 'u32', 'u64', 'i16', 'i32', 'i64'}
+        integer_compatibility['u16'] = {'u16', 'u32', 'u64', 'i32', 'i64'}
+        integer_compatibility['u32'] = {'u32', 'u64', 'i64'}
+        integer_compatibility['u64'] = {'u64'}
+
+        integer_compatibility['i8'] = {'i8', 'i16', 'i32', 'i64'}
+        integer_compatibility['i16'] = {'i16', 'i32', 'i64'}
+        integer_compatibility['i32'] = {'i32', 'i64'}
+        integer_compatibility['i64'] = {'i64'}
+
+        for expr in validated_exprs:
+            if not expr.type.is_integer():
+                return None, ValidationError(f'unable to infer type of array', array.span)
+
+            integer_name = expr.type.builtin().name
+            integer_candidates = integer_candidates.intersection(integer_compatibility[integer_name])
+
+        if len(integer_candidates) == 0:
+            return None, ValidationError('unable to find a common integer type for expressions array', array.span)
+
+        # Choose the hinted type if provided and possible.
+        if type_hint and type_hint.is_array() and type_hint.next.is_integer() and type_hint.next.builtin().name in integer_candidates:
+            chosen_name = type_hint.next.builtin().name
+        else:
+            # We might have multiple candidates left, pick in order of 'all_integer_types'.
+            chosen_name = 'i64'
+
+            for name in all_integer_types:
+                if name in integer_candidates:
+                    chosen_name = name
+                    break
+
+        element_type = CompleteType(Builtin(chosen_name))
+
+    return ValidatedArray(validated_exprs, array.span, CompleteType(Array(len(validated_exprs)), next=element_type)), None
+
+
+def validate_expression(scope: Scope, type_hint: CompleteType | None, expr: ParsedExpression) -> (ValidatedExpression | None, ValidationError | None):
     if isinstance(expr, ParsedUnaryOperation):
-        return validate_unop(scope, expr)
+        return validate_unop(scope, type_hint, expr)
     if isinstance(expr, ParsedBinaryOperation):
-        return validate_binop(scope, expr)
+        return validate_binop(scope, type_hint, expr)
     if isinstance(expr, ParsedPrimaryExpression):
-        return validate_primary_expr(scope, expr)
+        return validate_primary_expr(scope, type_hint, expr)
+
     raise NotImplementedError(expr)
 
 
 def validate_return_stmt(scope: Scope, parsed_return_stmt: ParsedReturn) -> (ValidatedReturnStatement | None, ValidationError | None):
-    validated_expr, error = validate_expression(scope, parsed_return_stmt.expression)
+    validated_expr, error = validate_expression(scope, None, parsed_return_stmt.expression)
     if error: return None, error
     return ValidatedReturnStatement([validated_expr], parsed_return_stmt.span), None
 
@@ -931,10 +1040,10 @@ def validate_variable_declaration(scope: Scope, parsed_variable_decl: ParsedVari
     validated_type, error = validate_type(scope, parsed_variable_decl.type)
     if error: return None, error
 
-    init_expr, error = validate_expression(scope, parsed_variable_decl.initializer)
+    init_expr, error = validate_expression(scope, validated_type, parsed_variable_decl.initializer)
     if error: return None, error
 
-    if not init_expr.type.eq_or_other_safely_convertible(init_expr.type):
+    if not validated_type.eq_or_other_safely_convertible(init_expr.type):
         return None, ValidationError(
             f'Type mismatch in variable declaration: declaration type = {validated_type}, initialization type = {init_expr.type}', parsed_variable_decl.span)
 
@@ -943,7 +1052,7 @@ def validate_variable_declaration(scope: Scope, parsed_variable_decl: ParsedVari
 
 def validate_while_stmt(scope: Scope, parsed_while: ParsedWhile) -> tuple[
     Optional[ValidatedWhileStatement], Optional[ValidationError]]:
-    condition, error = validate_expression(scope, parsed_while.condition)
+    condition, error = validate_expression(scope, CompleteType(Builtin('bool')), parsed_while.condition)
     if error: return None, error
 
     if not condition.type.is_builtin() or condition.type.builtin().name != 'bool':
@@ -965,7 +1074,7 @@ def validate_break_stmt(scope: Scope, parsed_break: ParsedBreakStatement) -> tup
 
 def validate_if_stmt(scope: Scope, parsed_if: ParsedIfStatement) -> tuple[
     Optional[ValidatedIfStatement], Optional[ValidationError]]:
-    condition, error = validate_expression(scope, parsed_if.condition)
+    condition, error = validate_expression(scope, CompleteType(Builtin('bool')), parsed_if.condition)
     if error: return None, error
 
     if not condition.type.is_builtin() or condition.type.builtin().name != 'bool':
@@ -1005,7 +1114,7 @@ def validate_block(parent_scope: Scope, block: ParsedBlock, while_block=False) -
             if error: return None, error
             stmts.append(validated_if_stmt)
         elif isinstance(stmt, ParsedExpression):
-            validated_expr, error = validate_expression(scope, stmt)
+            validated_expr, error = validate_expression(scope, None, stmt)
             if error: return None, error
             stmts.append(validated_expr)
         else:
@@ -1084,7 +1193,7 @@ def validate_array_type(scope: Scope, parsed_array_type: ParsedArrayType) -> (Co
     validated_type, error = validate_type(scope, parsed_array_type.parsed_type)
     if error: return None, error
 
-    validated_expr, error = validate_expression(scope, parsed_array_type.length)
+    validated_expr, error = validate_expression(scope, None, parsed_array_type.length)
     if error: return None, error
 
     # TODO: What types should we allow for array lengths?
@@ -1122,7 +1231,7 @@ def validate_type_literal(scope: Scope, parsed_type_literal: ParsedTypeLiteral) 
 
 def validate_type(scope: Scope, parsed_type: ParsedType) -> (CompleteType | None, ValidationError | None):
     if isinstance(parsed_type, ParsedExpression):
-        validated_expr, error = validate_expression(scope, parsed_type)
+        validated_expr, error = validate_expression(scope, None, parsed_type)
         if error: return None, error
 
         if not validated_expr.type.is_namespace():

@@ -8,7 +8,7 @@ from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedBlo
     ValidatedExpression, ValidatedNameExpr, ValidatedNumber, ValidatedCall, ValidatedBinaryOperation, \
     ValidatedUnaryOperation, ValidatedDotExpression, ValidatedIndexExpression, ValidatedStructExpression,\
     ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, ValidatedField, ValidatedReturnType, \
-    ValidatedParameter
+    ValidatedParameter, ValidatedArray
 
 
 # TODO: It feels like this function is badly named, but I am not sure what to call it yet.
@@ -73,6 +73,12 @@ def decay(complete_type : CompleteType) -> CompleteType:
 
 def codegen_prelude() -> str:
     out = '// PRELUDE\n'
+    out += '#define u8  unsigned char\n'
+    out += '#define u16 unsigned short\n'
+    out += '#define u32 unsigned int\n'
+    out += '#define u64 unsigned long\n'
+    out += '#define i8  char\n'
+    out += '#define i16 short\n'
     out += '#define i32 int\n'
     out += '#define i64 long\n'
     return out
@@ -207,6 +213,9 @@ def codegen_expr(expr: ValidatedExpression) -> str:
         return f'({c_typename_with_ptrs(expr.type)}' + '{})'
     elif isinstance(expr, ValidatedIndexExpression):
         return f'({codegen_expr(expr.expr())}.array[{codegen_expr(expr.index())}])'
+    elif isinstance(expr, ValidatedArray):
+        array_type_name = c_typename_with_wrapped_pointers(expr.type)
+        return f'({array_type_name}{{{{ {",".join(codegen_expr(expr) for expr in expr.children)} }}}})'
     else:
         raise NotImplementedError(expr)
 
