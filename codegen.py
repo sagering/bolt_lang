@@ -8,7 +8,7 @@ from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedBlo
     ValidatedExpression, ValidatedNameExpr, ValidatedNumber, ValidatedCall, ValidatedBinaryOperation, \
     ValidatedUnaryOperation, ValidatedDotExpression, ValidatedIndexExpression, ValidatedStructExpression,\
     ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, ValidatedField, ValidatedReturnType, \
-    ValidatedParameter, ValidatedArray
+    ValidatedParameter, ValidatedArray,  ValidatedExternFunctionDeclaration
 
 
 # TODO: It feels like this function is badly named, but I am not sure what to call it yet.
@@ -236,6 +236,14 @@ def codegen_function_definition(validated_function_definition : ValidatedFunctio
     return out
 
 
+def codegen_extern_function_declaration(validated_extern_function_decl : ValidatedExternFunctionDeclaration) -> str:
+    out = 'extern "C" '
+    pars = ','.join([f'{c_typename_with_ptrs(par.type)} {par.name}' for par in validated_extern_function_decl.pars()])
+    out += f'{c_typename_with_ptrs(validated_extern_function_decl.return_type().type)} {validated_extern_function_decl.name().name} ({pars})'
+    out += ';\n'
+    return out
+
+
 def codegen_stmt(stmt: ValidatedStatement) -> str:
     out = ''
     if isinstance(stmt, ValidatedFunctionDefinition):
@@ -277,6 +285,8 @@ def codegen_function_predeclarations(validated_module: ValidatedModule) -> str:
     for stmt in validated_module.body():
         if isinstance(stmt, ValidatedFunctionDefinition):
             out += codegen_function_definition(stmt, predeclaration=True)
+        elif isinstance(stmt, ValidatedExternFunctionDeclaration):
+            out += codegen_extern_function_declaration(stmt)
 
     return out
 

@@ -7,7 +7,7 @@ from parser import ParsedModule, ParsedFunctionDefinition, ParsedExpression, Par
     ParsedVariableDeclaration, ParsedWhile, ParsedBreakStatement, ParsedIfStatement, ParsedStruct, \
     ParsedField, ParsedType, ParsedTypeLiteral, ParsedPointerType, ParsedSliceType, ParsedArrayType, \
     ParsedStructExpression, ParsedDotExpression, ParsedPrimaryExpression, ParsedIndexExpression,\
-    ParsedArray, print_parser_error, TokenSource, parse_module
+    ParsedArray, ParsedExternFunctionDeclaration, print_parser_error, TokenSource, parse_module
 
 from lexer import lex
 
@@ -502,6 +502,14 @@ class ValidatedNumber:
 
 
 @dataclass
+class ValidatedString:
+    children : list['ValidatedNode']  # empty
+    span: Span
+    value: str
+    type: 'CompleteType'
+
+
+@dataclass
 class ValidatedUnaryOperation:
     children : list['ValidatedNode']
     span: Span
@@ -608,6 +616,16 @@ class ValidatedFunctionDefinition:
     def return_type(self) -> ValidatedReturnType: return self.children[1]
     def body(self) -> ValidatedBlock: return self.children[2]
     def pars(self) -> list['ValidatedParameter']: return self.children[3:]
+
+
+@dataclass
+class ValidatedExternFunctionDeclaration:
+    children : list['ValidatedNode']
+    span: Span
+
+    def name(self) -> ValidatedName: return self.children[0]
+    def return_type(self) -> ValidatedReturnType: return self.children[1]
+    def pars(self) -> list['ValidatedParameter']: return self.children[2:]
 
 
 OtherValidatedNodes = Union['ValidatedModule', ValidatedReturnType, ValidatedName, ValidatedBlock, ValidatedParameter, 'ValidatedField']
@@ -753,6 +771,10 @@ def validate_number(type_hint: CompleteType | None, parsed_number: ParsedNumber)
             return None, ValidationError(f'integer number {parsed_number.value} too large', parsed_number.span)
 
 
+def validate_string(type_hint: CompleteType | None, parsed_number: ParsedNumber) -> (ValidatedNumber | None, ValidationError | None):
+    return ValidatedString([], parsed_number.span, parsed_number.value, CompleteType(Builtin(builtin_name))), None
+
+
 def validate_unop(scope: Scope, _: CompleteType | None, parsed_unop: ParsedUnaryOperation) -> (ValidatedUnaryOperation | None, ValidationError | None):
     val_expr, error = validate_expression(scope, None, parsed_unop.rhs)
     if error: return None, error
@@ -883,7 +905,7 @@ def validate_dot_expr(scope: Scope, type_hint: CompleteType | None, parsed_dot_e
     if field := dot_into.struct().try_get_field(validated_name.name):
         return ValidatedDotExpression([validated_expr, validated_name], parsed_dot_expr.span, field.type, auto_deref), None
 
-    return None, ValidationError(f'fundamental type {dot_into.fundamental_type()} not found', parsed_dot_expr.span)
+    return None, ValidationError(f'field {validated_name.name} not found', parsed_dot_expr.span)
 
 
 def validate_index_expr(scope : Scope, type_hint: CompleteType | None, parsed_index_expr : ParsedIndexExpression) -> (ValidatedIndexExpression | None, ValidationError | None):
@@ -1123,7 +1145,7 @@ def validate_block(parent_scope: Scope, block: ParsedBlock, while_block=False) -
     return ValidatedBlock(stmts, block.span), None
 
 
-def validate_function_definition_pre(scope: Scope, function_definition: ParsedFunctionDefinition) -> (ValidatedFunctionDefinitionPre | None, ValidationError | None):
+def validate_function_definition_pre(scope: Scope, function_definition: ParsedFunctionDefinition | ParsedExternFunctionDeclaration) -> (ValidatedFunctionDefinitionPre | None, ValidationError | None):
     validated_name, error = validate_name(function_definition.name)
     if error: return None, error
 
@@ -1176,13 +1198,32 @@ def validate_function_definition(scope: Scope, function_definition: ParsedFuncti
             validated_return_stmt = validated_stmt
             break
 
-    if not validate_return_stmt:
+    if not validated_return_stmt:
         return None, ValidationError(f'missing return in function {function_definition.name}', function_definition.span)
 
     if not validated_return_type.eq_or_other_safely_convertible(validated_return_stmt.expr().type):
         return None, ValidationError(f'Return type mismatch in function "{function_definition.name.value}": declared return type is {validated_return_type}, but returning expression of type {validated_return_stmt.expr().type}', function_definition.span)
 
     return ValidatedFunctionDefinition([validated_name, ValidatedReturnType([], function_definition.return_type.span, validated_return_type), validated_block, *validated_pars], function_definition.span), None
+
+
+def validate_extern_function_declaration(scope: Scope, extern_function_declaration: ParsedExternFunctionDeclaration) -> (ValidatedExternFunctionDeclaration | None, ValidationError | None):
+    validated_name, error = validate_name(extern_function_declaration.name)
+    if error: return None, error
+
+    validated_pars: list[ValidatedParameter] = []
+
+    # check parameter types
+    for par in extern_function_declaration.pars:
+        validated_type, error = validate_type(scope, par.type)
+        if error: return None, error
+        validated_pars.append(ValidatedParameter([], par.span, par.name.value, validated_type))
+
+    # check return type
+    validated_return_type, error = validate_type(scope, extern_function_declaration.return_type)
+    if error: return None, error
+
+    return ValidatedExternFunctionDeclaration([validated_name, ValidatedReturnType([], extern_function_declaration.return_type.span,  validated_return_type), *validated_pars], extern_function_declaration.span), None
 
 
 def validate_name(parsed_name: ParsedName) -> (ValidatedName | None, ValidationError | None):
@@ -1307,37 +1348,45 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
     root_scope = create_root_scope()
     body: list[Union[ValidatedFunctionDefinition, ValidatedStruct, ValidatedVariableDeclaration]] = []
 
-    # pre pass
+    # pre pass 1
     for stmt in module.body:
-        if isinstance(stmt, ParsedFunctionDefinition):
+        if isinstance(stmt, ParsedStruct):
+            validated_struct_pre, error = validate_struct_pre(root_scope, stmt)
+            if error: return None, error
+            root_scope.add_struct_pre(validated_struct_pre)
+
+    # pre pass 2
+    for stmt in module.body:
+        if isinstance(stmt, ParsedFunctionDefinition) or isinstance(stmt, ParsedExternFunctionDeclaration):
             validated_function_def_pre, error = validate_function_definition_pre(root_scope, stmt)
             if error: return None, error
             function_par_types = [par.type for par in validated_function_def_pre.pars()]
             function_type = CompleteType(FunctionPointer(function_par_types, validated_function_def_pre.return_type().type))
             root_scope.functions.append(Function(validated_function_def_pre.name().name, function_type))
-        elif isinstance(stmt, ParsedStruct):
-            validated_struct_pre, error = validate_struct_pre(root_scope, stmt)
-            if error: return None, error
-            root_scope.add_struct_pre(validated_struct_pre)
 
-    # main pass
+    # main pass 1
+    for stmt in module.body:
+        if isinstance(stmt, ParsedStruct):
+            validated_struct, error = validate_struct(root_scope, stmt)
+            if error: return None, error
+            body.append(validated_struct)
+            root_scope.update_struct_fields(validated_struct)
+
+    # main pass 2
     for stmt in module.body:
         if isinstance(stmt, ParsedFunctionDefinition):
             validated_function_def, error = validate_function_definition(root_scope, stmt)
             if error: return None, error
             body.append(validated_function_def)
-        elif isinstance(stmt, ParsedStruct):
-            validated_struct, error = validate_struct(root_scope, stmt)
+        elif isinstance(stmt, ParsedExternFunctionDeclaration):
+            validated_extern_function_decl, error = validate_extern_function_declaration(root_scope, stmt)
             if error: return None, error
-            body.append(validated_struct)
-            root_scope.update_struct_fields(validated_struct)
+            body.append(validated_extern_function_decl)
         elif isinstance(stmt, ParsedVariableDeclaration):
             validated_variable_declaration, error = validate_variable_declaration(root_scope, stmt)
             if error: return None, error
             body.append(validated_variable_declaration)
             root_scope.add_var(validated_variable_declaration)
-        else:
-            raise NotImplementedError()
 
     # Determine order of structs and detect cycles.
     scopes = [root_scope]

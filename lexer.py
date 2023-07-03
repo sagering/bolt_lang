@@ -50,6 +50,7 @@ class TokenKind(Enum):
     RightCurly = 21
     Ampersand = 22
     Dot = 23
+    String = 23
 
 
 @dataclass
@@ -171,6 +172,10 @@ def lex(input : str) -> tuple[list[TokenSpan] | None, str | None]:
             elif char == '&':
                 tokens.append(TokenSpan(Token(TokenKind.Ampersand), Span(tindex.index, tindex.index + 1)))
                 tindex.index += 1
+            elif char == '"':
+                token_span, error = lex_string(tindex)
+                if error: return None, error
+                tokens.append(token_span)
             elif char in '.':
                 if tindex.text[tindex.index + 1].isdigit():
                     token_span, error = lex_number(tindex)
@@ -235,6 +240,22 @@ def lex_name(tindex : TextIndex) -> (TokenSpan | None, str | None):
 
     return TokenSpan(Token(TokenKind.Name, tindex.text[start:tindex.index]), Span(start, tindex.index)), None
 
+
+def lex_string(tindex : TextIndex) -> (TokenSpan | None, str | None):
+    start : int = tindex.index
+
+    if tindex.index < len(tindex.text) and not tindex.text[tindex.index] == '"':
+        return None, f'unexpected start character {tindex.text[tindex.index]} of string token'
+
+    tindex.index += 1
+
+    while tindex.index < len(tindex.text) and tindex.text[tindex.index] != '"':
+        tindex.index += 1
+
+    if tindex.index < start + 2:
+        return None, 'missing closing " of string literal'
+
+    return TokenSpan(Token(TokenKind.String, tindex.text[start:tindex.index]), Span(start, tindex.index)), None
 
 if __name__ == "__main__":
     print(lex("( 1231.1231 ) * ( 0213.1 )\n    \n"))

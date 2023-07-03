@@ -1,0 +1,10 @@
+
+
+extern open(pathname : *u8, flags : i32, mode : i32) : i32
+extern write(fd : i32, buffer : *u8, count : u64) : u64
+
+main() : i32
+    let pathname : [9]u8 = [116, 101, 115, 116, 46, 116, 120, 116, 0]
+    open(&pathname[0], 2 + 100, 0)
+    write(1, &pathname[0], 9)
+    return 0
