@@ -4,7 +4,7 @@ from os import path
 
 from lexer import lex
 from parser import parse_module, TokenSource, print_parser_error
-from validator import validate_module
+from validator import validate_module, print_validator_error
 from codegen import codegen_module
 
 
@@ -26,7 +26,7 @@ def compile(filepath : str) -> str | None:
 
     validated_module, error = validate_module(parsed_module)
     if error:
-        print(error)
+        print_validator_error(error, text)
         return None
 
     return codegen_module(validated_module)

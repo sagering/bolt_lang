@@ -252,10 +252,12 @@ def lex_string(tindex : TextIndex) -> (TokenSpan | None, str | None):
     while tindex.index < len(tindex.text) and tindex.text[tindex.index] != '"':
         tindex.index += 1
 
-    if tindex.index < start + 2:
+    if tindex.index == len(tindex.text) or tindex.text[tindex.index] != '"':
         return None, 'missing closing " of string literal'
 
-    return TokenSpan(Token(TokenKind.String, tindex.text[start:tindex.index]), Span(start, tindex.index)), None
+    tindex.index += 1
+
+    return TokenSpan(Token(TokenKind.String, tindex.text[start+1:tindex.index-1]), Span(start, tindex.index)), None
 
 if __name__ == "__main__":
     print(lex("( 1231.1231 ) * ( 0213.1 )\n    \n"))

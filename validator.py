@@ -7,7 +7,7 @@ from parser import ParsedModule, ParsedFunctionDefinition, ParsedExpression, Par
     ParsedVariableDeclaration, ParsedWhile, ParsedBreakStatement, ParsedIfStatement, ParsedStruct, \
     ParsedField, ParsedType, ParsedTypeLiteral, ParsedPointerType, ParsedSliceType, ParsedArrayType, \
     ParsedStructExpression, ParsedDotExpression, ParsedPrimaryExpression, ParsedIndexExpression,\
-    ParsedArray, ParsedExternFunctionDeclaration, print_parser_error, TokenSource, parse_module
+    ParsedArray, ParsedExternFunctionDeclaration, ParsedString, print_parser_error, TokenSource, parse_module
 
 from lexer import lex
 
@@ -110,6 +110,9 @@ class CompleteType:
 
     def is_integer(self) -> bool:
         return self.is_builtin() and self.builtin().name in ['i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64']
+
+    def is_str(self) -> bool:
+        return self.is_builtin() and self.builtin().name == 'str'
 
     def is_function_ptr(self) -> bool:
         return isinstance(self.val, FunctionPointer)
@@ -571,7 +574,7 @@ class ValidatedIndexExpression:
 
 
 ValidatedExpression = Union[
-    ValidatedNumber, ValidatedNameExpr, ValidatedUnaryOperation, ValidatedBinaryOperation, ValidatedCall, ValidatedDotExpression, ValidatedStructExpression, ValidatedIndexExpression, 'ValidatedArray']
+    ValidatedNumber, ValidatedNameExpr, ValidatedUnaryOperation, ValidatedBinaryOperation, ValidatedCall, ValidatedDotExpression, ValidatedStructExpression, ValidatedIndexExpression, 'ValidatedArray', ValidatedString]
 
 
 @dataclass
@@ -771,8 +774,8 @@ def validate_number(type_hint: CompleteType | None, parsed_number: ParsedNumber)
             return None, ValidationError(f'integer number {parsed_number.value} too large', parsed_number.span)
 
 
-def validate_string(type_hint: CompleteType | None, parsed_number: ParsedNumber) -> (ValidatedNumber | None, ValidationError | None):
-    return ValidatedString([], parsed_number.span, parsed_number.value, CompleteType(Builtin(builtin_name))), None
+def validate_string(type_hint: CompleteType | None, parsed_str: ParsedString) -> (ValidatedNumber | None, ValidationError | None):
+    return ValidatedString([], parsed_str.span, parsed_str.value, CompleteType(Slice(), CompleteType(Builtin('u8')))), None
 
 
 def validate_unop(scope: Scope, _: CompleteType | None, parsed_unop: ParsedUnaryOperation) -> (ValidatedUnaryOperation | None, ValidationError | None):
@@ -918,7 +921,7 @@ def validate_index_expr(scope : Scope, type_hint: CompleteType | None, parsed_in
     if not index.type.is_integer():
         return None, ValidationError(f'expected integer as index, got {index.type}', parsed_index_expr.index.span)
 
-    if validated_expr.type.is_array() or validated_expr.type.is_slice():
+    if validated_expr.type.is_array() or validated_expr.type.is_slice() or validated_expr.type.is_str():
         return ValidatedIndexExpression([validated_expr, index], parsed_index_expr.span, validated_expr.type.next), None
 
     return None, ValidationError(f'cannot index {validated_expr.type}', validated_expr.span)
@@ -953,6 +956,8 @@ def validate_primary_expr(scope, type_hint: CompleteType | None, expr : ParsedPr
         return validate_name_expr(scope, type_hint, expr)
     if isinstance(expr, ParsedNumber):
         return validate_number(type_hint, expr)
+    if isinstance(expr, ParsedString):
+        return validate_string(type_hint, expr)
     if isinstance(expr, ParsedCall):
         return validate_call(scope, type_hint, expr)
     if isinstance(expr, ParsedStructExpression):
@@ -1469,6 +1474,52 @@ def visit_nodes(node : ValidatedNode, visitor : Callable[[ValidatedNode], None])
         visit_nodes(child, visitor)
 
 
+class Colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
+def print_validator_error(error: ValidationError, text: str):
+    def overlaps(a: Span, b: Span) -> bool:
+        return a.start < b.end and a.end > b.start
+
+    lines = text.split('\n')
+
+    idx = 0
+    line_idx = 0
+    found = False
+
+    for line in lines:
+        line_span = Span(idx,
+                         idx + len(line) + 2)  # +2 because +1 for the '\n' char and +1 because span end is exclusive
+
+        if overlaps(error.span, line_span):
+            found = True
+            break
+
+        idx = line_span.end - 1
+        line_idx += 1
+
+    print(Colors.FAIL + f'Parser error at {line_idx + 1}:{error.span.start - idx + 1}:\n' + Colors.ENDC)
+
+    if found:
+        print("...")
+        print(lines[line_idx - 1])
+        print(lines[line_idx][:error.span.start - idx] + Colors.FAIL + lines[line_idx][
+                                                                       error.span.start - idx:error.span.end - idx] + Colors.ENDC +
+              lines[line_idx][error.span.end - idx:])
+        print(Colors.FAIL + ' ' * (error.span.start - idx) + '^- ' + error.msg + Colors.ENDC)
+        print(lines[line_idx + 1])
+        print("...")
+    else:
+        print('\n'.join(lines[-3:]))
 
 def main():
     file_name = 'tests/example.bolt'

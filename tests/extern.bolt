@@ -3,8 +3,12 @@
 extern open(pathname : *u8, flags : i32, mode : i32) : i32
 extern write(fd : i32, buffer : *u8, count : u64) : u64
 
+print(str : []u8) : i32
+    write(1, &str[0], 30)
+    return 0
+
 main() : i32
-    let pathname : [9]u8 = [116, 101, 115, 116, 46, 116, 120, 116, 0]
-    open(&pathname[0], 2 + 100, 0)
-    write(1, &pathname[0], 9)
+    let pathname : []u8 = "/home/build/hello123.txt"
+    open(&pathname[0], 102, 0)
+    print("whathathathat     !!!!!!!!!!!!!!")
     return 0

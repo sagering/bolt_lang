@@ -8,8 +8,10 @@ from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedBlo
     ValidatedExpression, ValidatedNameExpr, ValidatedNumber, ValidatedCall, ValidatedBinaryOperation, \
     ValidatedUnaryOperation, ValidatedDotExpression, ValidatedIndexExpression, ValidatedStructExpression,\
     ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, ValidatedField, ValidatedReturnType, \
-    ValidatedParameter, ValidatedArray,  ValidatedExternFunctionDeclaration
+    ValidatedParameter, ValidatedArray,  ValidatedExternFunctionDeclaration, ValidatedString
 
+
+string_table : dict[str, int] = dict()
 
 # TODO: It feels like this function is badly named, but I am not sure what to call it yet.
 def c_typename_with_wrapped_pointers(complete_type: CompleteType) -> str:
@@ -107,6 +109,28 @@ def codegen_struct_predeclarations(type_dict : dict[str, CompleteType]) -> str:
         if v.is_builtin() or v.is_function_ptr() or decay(v).is_builtin():
             continue
         out += f'struct {c_typename_with_wrapped_pointers(v)};\n'
+    return out
+
+
+def codegen_string_table() -> str:
+    size = 0
+    for s in string_table.keys():
+        size += len(s.encode('utf-8')) + 1
+
+    out = "// STRING TABLE\n"
+    out += f"u8 STRING_TABLE[{size}] = {{"
+
+    offset = 0
+    for s in string_table.keys():
+        bytes = s.encode('utf-8')
+        if offset != 0:
+            out += ','
+        out += ','.join([str(b) for b in bytes])
+        out += ',0'
+        string_table[s] = offset
+        offset += len(bytes) + 1
+
+    out += "};\n"
     return out
 
 
@@ -212,10 +236,17 @@ def codegen_expr(expr: ValidatedExpression) -> str:
     elif isinstance(expr, ValidatedStructExpression):
         return f'({c_typename_with_ptrs(expr.type)}' + '{})'
     elif isinstance(expr, ValidatedIndexExpression):
+        if expr.expr().type.is_slice():
+            return f'({codegen_expr(expr.expr())}.to[{codegen_expr(expr.index())}])'
         return f'({codegen_expr(expr.expr())}.array[{codegen_expr(expr.index())}])'
     elif isinstance(expr, ValidatedArray):
         array_type_name = c_typename_with_wrapped_pointers(expr.type)
         return f'({array_type_name}{{{{ {",".join(codegen_expr(expr) for expr in expr.children)} }}}})'
+    elif isinstance(expr, ValidatedString):
+        slice_type_name = c_typename_with_wrapped_pointers(expr.type)
+        offset = string_table[expr.value]
+        length = len(expr.value.encode('utf-8'))
+        return f'({slice_type_name}{{&STRING_TABLE[{offset}], {length}}})'
     else:
         raise NotImplementedError(expr)
 
@@ -223,12 +254,12 @@ def codegen_expr(expr: ValidatedExpression) -> str:
 def codegen_function_definition(validated_function_definition : ValidatedFunctionDefinition, predeclaration : bool) -> str:
     out = ''
     pars = ','.join([f'{c_typename_with_ptrs(par.type)} {par.name}' for par in validated_function_definition.pars()])
-    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().type)} {validated_function_definition.name().name} ({pars})'
+    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().type)} {validated_function_definition.name().name}({pars})'
 
     if predeclaration:
         out += ';\n'
     else:
-        out += '{\n'
+        out += ' {\n'
         for substmt in validated_function_definition.body().statements():
             out += codegen_stmt(substmt)
         out += '}\n'
@@ -303,7 +334,7 @@ def codegen_module(validated_module: ValidatedModule) -> str:
 
     type_dict = {}
 
-    # Collect all type that we encounter in this module.
+    # Collect all types that we encounter in this module.
     def collect_type(node : ValidatedNode) -> None:
         TypedNodes = Union[ValidatedField, ValidatedReturnType, ValidatedParameter, ValidatedVariableDeclaration]
         if isinstance(node, TypedNodes):
@@ -313,10 +344,20 @@ def codegen_module(validated_module: ValidatedModule) -> str:
 
     visit_nodes(validated_module, collect_type)
 
+    # Collect all strings.
+    def collect_string(node : ValidatedNode) -> None:
+        if isinstance(node, ValidatedString):
+            if node.value in string_table:
+                return
+            string_table[node.value] = len(string_table)
+
+    visit_nodes(validated_module, collect_string)
+
     out = ''
     out += codegen_prelude()
     out += codegen_struct_predeclarations(type_dict)
     out += codegen_slices(type_dict)
+    out += codegen_string_table()
     out += codegen_struct_definitions(type_dict)
     out += codegen_variable_definitions(validated_module)
     out += codegen_function_predeclarations(validated_module)
