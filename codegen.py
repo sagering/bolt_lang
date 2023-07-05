@@ -229,6 +229,8 @@ def codegen_expr(expr: ValidatedExpression) -> str:
     elif isinstance(expr, ValidatedBinaryOperation):
         return f'({codegen_expr(expr.lhs())}{expr.op.op.literal()}{codegen_expr(expr.rhs())})'
     elif isinstance(expr, ValidatedCall):
+        if expr.expr().name == 'len':
+            return f'({codegen_expr(expr.args()[0])}.length)'
         return f'({codegen_expr(expr.expr())}({",".join([codegen_expr(arg) for arg in expr.args()])}))'
     elif isinstance(expr, ValidatedDotExpression):
         deref = '*' if expr.auto_deref else ''

@@ -81,6 +81,11 @@ class Builtin:
 
 
 @dataclass
+class PlaceholderType:
+    pass
+
+
+@dataclass
 class CompleteType:
     """ Complete types still require a scope context to resolve the fundamental type names.
         The complete type holds the Type that can come out of an expression.
@@ -88,7 +93,7 @@ class CompleteType:
         to builtin or potentially nested declared types (= fundamental types).
     """
 
-    HoldingTypes = Union[Pointer, Array, Slice, FunctionPointer, Namespace, Struct, Builtin]
+    HoldingTypes = Union[Pointer, Array, Slice, FunctionPointer, Namespace, Struct, Builtin, PlaceholderType]
 
     val: HoldingTypes
     next: Optional['CompleteType'] = None
@@ -105,20 +110,30 @@ class CompleteType:
     def is_builtin(self):
         return isinstance(self.val, Builtin)
 
+    def is_placeholder(self):
+        return isinstance(self.val, PlaceholderType)
+
+    def is_slice_placeholder(self):
+        return self.is_slice() and self.next is not None and self.next.is_placeholder()
+
     def is_struct(self):
         return isinstance(self.val, Struct)
 
     def is_integer(self) -> bool:
         return self.is_builtin() and self.builtin().name in ['i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64']
 
-    def is_str(self) -> bool:
-        return self.is_builtin() and self.builtin().name == 'str'
-
     def is_function_ptr(self) -> bool:
         return isinstance(self.val, FunctionPointer)
 
     def is_namespace(self) -> bool:
         return isinstance(self.val, Namespace)
+
+    def adopt(self, other) -> bool:
+        assert(self.is_placeholder())
+        assert(not self.is_placeholder())
+        # TODO: taking references here might become a problem
+        self.val = other.val
+        self.next = other.next
 
     def get(self) -> HoldingTypes:
         return self.val
@@ -160,6 +175,8 @@ class CompleteType:
             return f'@function:({pars})->({function_ptr.ret.to_string()})'
         elif self.is_namespace():
             return f'@namespace:{self.namespace().name}'
+        elif self.is_placeholder():
+            return f'@placeholder'
         else:
             raise NotImplemented()
 
@@ -190,7 +207,7 @@ class CompleteType:
                 par.collect_downstream_types(bag)
             self.function_ptr().ret.collect_downstream_types(bag)
             return
-        elif self.is_namespace():
+        elif self.is_namespace() or self.is_placeholder():
             pass
         else:
             raise NotImplemented()
@@ -202,7 +219,6 @@ class CompleteType:
         return self.eq(other)
 
     def eq(self, other: 'CompleteType') -> bool:
-
         if self.is_pointer() and other.is_pointer():
             return self.next.eq(other.next)
 
@@ -837,6 +853,7 @@ def validate_binop(scope: Scope, type_hint: CompleteType | None, parsed_binop: P
 
 
 def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: ParsedCall) -> (ValidatedCall | None, ValidationError | None):
+
     validated_expr, error = validate_expression(scope, None, parsed_call.expr)
     if error: return None, error
 
@@ -855,11 +872,34 @@ def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: Par
     if len(function_ptr.pars) != len(validated_args):
         return None, ValidationError(f'Wrong number of arguments in call to function', parsed_call.span)
 
+    if len(function_ptr.pars) == 1 and function_ptr.pars[0].is_slice_placeholder() and validated_args[0].type.is_slice():
+        function_ptr.pars[0].next = validated_args[0].type.next
+        return ValidatedCall([validated_expr, *validated_args], parsed_call.span, function_ptr.ret), None
+
     for idx, (a, b) in enumerate(zip(function_ptr.pars, validated_args)):
         if not a.eq_or_other_safely_convertible(b.type):
             return None, ValidationError(f'Type mismatch in {idx + 1}th argument in call to function', parsed_call.span)
 
     return ValidatedCall([validated_expr, *validated_args], parsed_call.span, function_ptr.ret), None
+
+
+def validate_len(scope: Scope, type_hint: CompleteType | None, parsed_call: ParsedCall) -> (ValidatedCall | None, ValidationError | None):
+    validated_expr, error = validate_expression(scope, None, parsed_call.expr)
+    if error: return None, error
+
+    if not validated_expr.type.is_len():
+        return None, ValidationError(f'expression type {validated_expr.type.get()} not len', validated_expr.span)
+
+    if len(parsed_call.args) != 1:
+        return None, ValidationError(f'expected 1 argument for len', validated_expr.span)
+
+    validated_arg, error = validate_expression(scope, None, parsed_call.args[0])
+    if error: return None, error
+
+    if not validated_arg.type.is_slice():
+        return None, ValidationError(f'expected argument to be slice for call to len', validated_arg.span)
+
+    return ValidatedCall([validated_expr, validated_arg], parsed_call.span, CompleteType(Builtin('u64'))), None
 
 
 def validate_struct_expression(scope: Scope,type_hint: CompleteType | None, parsed_struct_expression: ParsedStructExpression) -> (ValidatedStructExpression | None, ValidationError | None):
@@ -928,7 +968,6 @@ def validate_index_expr(scope : Scope, type_hint: CompleteType | None, parsed_in
 
 
 def validate_name_expr(scope: Scope, type_hint: CompleteType | None, parsed_name: ParsedName) -> (ValidatedNameExpr | None, ValidationError | None):
-
     if var := scope.find_var(parsed_name.value):
         return ValidatedNameExpr([], parsed_name.span, parsed_name.value, var.type), None
 
@@ -946,6 +985,10 @@ def validate_name_expr(scope: Scope, type_hint: CompleteType | None, parsed_name
 
     if parsed_name.value in ['true', 'false']:
         return ValidatedNameExpr([], parsed_name.span, parsed_name.value, CompleteType(Builtin('bool'))), None
+
+    if parsed_name.value == 'len':
+        lentype = CompleteType(FunctionPointer([CompleteType(Slice(), CompleteType(PlaceholderType()))], CompleteType(Builtin('u64'))))
+        return ValidatedNameExpr([], parsed_name.span, parsed_name.value, lentype), None
 
     return None, ValidationError(f'name {parsed_name.value} not found in scope {scope.namespace}', parsed_name.span)
 
