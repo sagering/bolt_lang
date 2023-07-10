@@ -8,7 +8,8 @@ from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedBlo
     ValidatedExpression, ValidatedNameExpr, ValidatedNumber, ValidatedCall, ValidatedBinaryOperation, \
     ValidatedUnaryOperation, ValidatedDotExpression, ValidatedIndexExpression, ValidatedStructExpression,\
     ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, ValidatedField, ValidatedReturnType, \
-    ValidatedParameter, ValidatedArray,  ValidatedExternFunctionDeclaration, ValidatedString
+    ValidatedParameter, ValidatedArray,  ValidatedExternFunctionDeclaration, ValidatedString, \
+    ValidatedSliceExpression, SliceBoundaryPlaceholder, ValidatedAssignment
 
 
 string_table : dict[str, int] = dict()
@@ -249,6 +250,23 @@ def codegen_expr(expr: ValidatedExpression) -> str:
         offset = string_table[expr.value]
         length = len(expr.value.encode('utf-8'))
         return f'({slice_type_name}{{&STRING_TABLE[{offset}], {length}}})'
+    elif isinstance(expr, ValidatedSliceExpression):
+        source_slice = codegen_expr(expr.expr())
+        slice_type_name = c_typename_with_wrapped_pointers(expr.type)
+
+        # FIXME: When slicing an unnamed slice, this code creates the temporary (unnamed) slice twice.
+        if isinstance(expr.start(), SliceBoundaryPlaceholder):
+            slice_start = '(0)'
+        else:
+            slice_start = codegen_expr(expr.start())
+
+        if isinstance(expr.end(), SliceBoundaryPlaceholder):
+            slice_end = '(' + codegen_expr(expr.expr()) + '.length)'
+        else:
+            slice_end = codegen_expr(expr.end())
+
+        return f'({slice_type_name}{{{source_slice}.to + {slice_start}, ({slice_end} - {slice_start})}})'
+
     else:
         raise NotImplementedError(expr)
 
@@ -297,6 +315,8 @@ def codegen_stmt(stmt: ValidatedStatement) -> str:
         for substmt in stmt.block().statements():
             out += codegen_stmt(substmt)
         out += '}\n'
+    elif isinstance(stmt, ValidatedAssignment):
+        out += f'{codegen_expr(stmt.name())} = {codegen_expr(stmt.expr())};'
     elif isinstance(stmt, ValidatedExpression):
         out += codegen_expr(stmt) + ';\n'
     else:

@@ -7,7 +7,8 @@ from parser import ParsedModule, ParsedFunctionDefinition, ParsedExpression, Par
     ParsedVariableDeclaration, ParsedWhile, ParsedBreakStatement, ParsedIfStatement, ParsedStruct, \
     ParsedField, ParsedType, ParsedTypeLiteral, ParsedPointerType, ParsedSliceType, ParsedArrayType, \
     ParsedStructExpression, ParsedDotExpression, ParsedPrimaryExpression, ParsedIndexExpression,\
-    ParsedArray, ParsedExternFunctionDeclaration, ParsedString, print_parser_error, TokenSource, parse_module
+    ParsedArray, ParsedExternFunctionDeclaration, ParsedString, ParsedSliceExpression, print_parser_error,\
+    TokenSource, ParsedAssignment, parse_module
 
 from lexer import lex
 
@@ -279,7 +280,7 @@ def is_binary_operator_defined(lhs: CompleteType, rhs: CompleteType, op: Operato
         match op:
             case Operator.Minus | Operator.Plus | Operator.Minus | Operator.Multiply | Operator.Divide:
                 return lhs
-            case Operator.Equals:
+            case Operator.Equals | Operator.LessThan:
                 return CompleteType(Builtin('bool'))
             case _:
                 return None
@@ -589,6 +590,17 @@ class ValidatedIndexExpression:
     def index(self) -> 'ValidatedExpression': return self.children[1]
 
 
+@dataclass
+class ValidatedSliceExpression:
+    children : list['ValidatedNode']
+    span: Span
+    type: 'CompleteType'
+
+    def expr(self) -> 'ValidatedExpression': return self.children[0]
+    def start(self) -> 'ValidatedExpression': return self.children[1]
+    def end(self) -> 'ValidatedExpression': return self.children[2]
+
+
 ValidatedExpression = Union[
     ValidatedNumber, ValidatedNameExpr, ValidatedUnaryOperation, ValidatedBinaryOperation, ValidatedCall, ValidatedDotExpression, ValidatedStructExpression, ValidatedIndexExpression, 'ValidatedArray', ValidatedString]
 
@@ -692,6 +704,15 @@ class ValidatedIfStatement:
 
 
 @dataclass
+class ValidatedAssignment:
+    children: list['ValidatedNode']
+    span: Span
+
+    def name(self) -> ValidatedExpression: return self.children[0]
+    def expr(self) -> ValidatedExpression: return self.children[1]
+
+
+@dataclass
 class ValidatedField:
     children: list['ValidatedNode']
     span: Span
@@ -719,10 +740,16 @@ class ValidatedStructPre:
     def name(self) -> ValidatedName: return self.children[0]
 
 
+@dataclass
+class SliceBoundaryPlaceholder:
+    span: Span
+    children: list['ValidatedNode'] = field(default_factory=list)
+
+
 ValidatedStatement = Union[
     ValidatedFunctionDefinition, ValidatedReturnStatement, ValidatedVariableDeclaration, ValidatedWhileStatement, ValidatedBreakStatement, ValidatedExpression, ValidatedIfStatement]
 
-ValidatedNode = Union[ValidatedStatement, ValidatedStruct, OtherValidatedNodes]
+ValidatedNode = Union[ValidatedStatement, ValidatedStruct, SliceBoundaryPlaceholder, OtherValidatedNodes]
 
 
 @dataclass
@@ -961,10 +988,38 @@ def validate_index_expr(scope : Scope, type_hint: CompleteType | None, parsed_in
     if not index.type.is_integer():
         return None, ValidationError(f'expected integer as index, got {index.type}', parsed_index_expr.index.span)
 
-    if validated_expr.type.is_array() or validated_expr.type.is_slice() or validated_expr.type.is_str():
+    if validated_expr.type.is_array() or validated_expr.type.is_slice():
         return ValidatedIndexExpression([validated_expr, index], parsed_index_expr.span, validated_expr.type.next), None
 
     return None, ValidationError(f'cannot index {validated_expr.type}', validated_expr.span)
+
+
+def validate_slice_expr(scope : Scope, type_hint: CompleteType | None, parsed_slice_expr : ParsedSliceExpression) -> (ValidatedSliceExpression | None, ValidationError | None):
+    validated_expr, error = validate_expression(scope, None, parsed_slice_expr.expr)
+    if error: return None, error
+
+    if not validated_expr.type.is_slice():
+        return None, ValidationError(f'Expression not sliceable', validated_expr.span)
+
+    if parsed_slice_expr.start:
+        start, error = validate_expression(scope, None, parsed_slice_expr.start)
+        if error: return None, error
+
+        if not start.type.is_integer():
+            return None, ValidationError(f'expected integer as index, got {start.type}', parsed_slice_expr.start.span)
+    else:
+        start = SliceBoundaryPlaceholder(span=parsed_slice_expr.span)
+
+    if parsed_slice_expr.end:
+        end, error = validate_expression(scope, None, parsed_slice_expr.end)
+        if error: return None, error
+
+        if not end.type.is_integer():
+            return None, ValidationError(f'expected integer as index, got {end.type}', parsed_slice_expr.end.span)
+    else:
+        end = SliceBoundaryPlaceholder(span=parsed_slice_expr.span)
+
+    return ValidatedSliceExpression([validated_expr, start, end], parsed_slice_expr.span, CompleteType(Slice(), validated_expr.type.next)), None
 
 
 def validate_name_expr(scope: Scope, type_hint: CompleteType | None, parsed_name: ParsedName) -> (ValidatedNameExpr | None, ValidationError | None):
@@ -1009,6 +1064,8 @@ def validate_primary_expr(scope, type_hint: CompleteType | None, expr : ParsedPr
         return validate_dot_expr(scope, type_hint, expr)
     if isinstance(expr, ParsedIndexExpression):
         return validate_index_expr(scope, type_hint, expr)
+    if isinstance(expr, ParsedSliceExpression):
+        return validate_slice_expr(scope, type_hint, expr)
     if isinstance(expr, ParsedArray):
         return validate_array(scope, type_hint, expr)
 
@@ -1156,6 +1213,22 @@ def validate_if_stmt(scope: Scope, parsed_if: ParsedIfStatement) -> tuple[
     return ValidatedIfStatement([condition, block], parsed_if.span), None
 
 
+def validate_assignment_stmt(scope: Scope, parsed_assignment: ParsedAssignment) -> tuple[
+    Optional[ValidatedAssignment], Optional[ValidationError]]:
+
+    var = scope.find_var(parsed_assignment.name.value)
+    if not var:
+        return None, ValidationError(f'expected valid variable', parsed_assignment.name.span)
+
+    value, error = validate_expression(scope, var.type, parsed_assignment.value)
+    if error: return None, error
+
+    if not var.type.eq_or_other_safely_convertible(value.type):
+        return None, ValidationError(f'incompatible types in assignment', parsed_assignment.span)
+
+    return ValidatedAssignment([ValidatedNameExpr([], parsed_assignment.name.span, parsed_assignment.name.value, var.type), value], parsed_assignment.span), None
+
+
 def validate_block(parent_scope: Scope, block: ParsedBlock, while_block=False) -> (ValidatedBlock | None, ValidationError | None):
     scope = Scope('', parent_scope)
     scope.inside_while_block = while_block
@@ -1183,6 +1256,10 @@ def validate_block(parent_scope: Scope, block: ParsedBlock, while_block=False) -
             validated_if_stmt, error = validate_if_stmt(scope, stmt)
             if error: return None, error
             stmts.append(validated_if_stmt)
+        elif isinstance(stmt, ParsedAssignment):
+            validated_assignment_stmt, error = validate_assignment_stmt(scope, stmt)
+            if error: return None, error
+            stmts.append(validated_assignment_stmt)
         elif isinstance(stmt, ParsedExpression):
             validated_expr, error = validate_expression(scope, None, stmt)
             if error: return None, error
@@ -1510,7 +1587,6 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
 
 
 def visit_nodes(node : ValidatedNode, visitor : Callable[[ValidatedNode], None]):
-
     visitor(node)
 
     for child in node.children:

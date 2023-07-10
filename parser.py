@@ -70,6 +70,9 @@ class TokenSource:
     def eof(self) -> bool:
         return self.peek().token.kind == TokenKind.EOF
 
+    def remaining(self):
+        return len(self.tokens) - self.index
+
 
 class Operator(Enum):
     Plus = 1
@@ -78,9 +81,12 @@ class Operator(Enum):
     Divide = 4
     Equals = 5
     And = 6
+    LessThan = 7
 
     def precedence(self) -> int:
         match self:
+            case Operator.LessThan:
+                return 4
             case Operator.Equals:
                 return 5
             case Operator.Plus:
@@ -104,6 +110,8 @@ class Operator(Enum):
                 return '*'
             case Operator.Divide:
                 return '/'
+            case Operator.LessThan:
+                return '<'
             case Operator.Equals:
                 return '=='
             case Operator.And:
@@ -161,6 +169,14 @@ class ParsedIndexExpression:
 
 
 @dataclass
+class ParsedSliceExpression:
+    expr: 'ParsedPrimaryExpression'
+    start: 'ParsedExpression'
+    end: 'ParsedExpression'
+    span: Span
+
+
+@dataclass
 class ParsedDotExpression:
     expr: 'ParsedPrimaryExpression'
     name: ParsedName
@@ -187,7 +203,7 @@ class ParsedString:
 
 ParsedAtom = Union[ParsedName, ParsedNumber, ParsedArray, ParsedString]
 
-ParsedPrimaryExpression = Union[ParsedCall, ParsedIndexExpression, ParsedDotExpression, ParsedStructExpression, ParsedAtom]
+ParsedPrimaryExpression = Union[ParsedCall, ParsedIndexExpression, ParsedSliceExpression, ParsedDotExpression, ParsedStructExpression, ParsedAtom]
 
 ParsedExpression = Union[ParsedUnaryOperation, ParsedBinaryOperation, ParsedPrimaryExpression]
 
@@ -215,7 +231,7 @@ class ParsedVariableDeclaration:
 
 @dataclass
 class ParsedAssignment:
-    name: str
+    name: ParsedName
     value: ParsedExpression
     span: Span
 
@@ -306,6 +322,9 @@ def parse_operator(token_source: TokenSource) -> (ParsedOperator | None, ParserE
         case TokenKind.ForwardSlash:
             token_source.advance()
             return ParsedOperator(Operator.Divide, Span(start, token_source.idx())), None
+        case TokenKind.LessThan:
+            token_source.advance(1)
+            return ParsedOperator(Operator.LessThan, Span(start, token_source.idx())), None
         case TokenKind.Equals if token_source.match_token(Token(TokenKind.Equals), 1):
             token_source.advance(2)
             return ParsedOperator(Operator.Equals, Span(start, token_source.idx())), None
@@ -331,9 +350,16 @@ def parse_primary_expr(left : ParsedPrimaryExpression | None, token_source : Tok
             if error: return None, error
             return parse_primary_expr(parsed_struct_expression, token_source)
         elif token_source.match_token(Token(TokenKind.LeftBracket)):
-            parsed_index_expr, error = parse_index_expr(left, token_source)
-            if error: return None, error
-            return parse_primary_expr(parsed_index_expr, token_source)
+            start_index = token_source.index
+            expr, error = parse_index_expr(left, token_source)
+            if error:
+                # Reset start index, because parse_index_expr might have already consumed some tokens which are needed
+                # in parse_slice_expr.
+                token_source.index = start_index
+                expr, error = parse_slice_expr(left, token_source)
+            if error:
+                return None, error
+            return parse_primary_expr(expr, token_source)
         else:
             return left, None
 
@@ -448,6 +474,23 @@ def parse_index_expr(left : ParsedPrimaryExpression, token_source: TokenSource) 
     if error: return None, error
 
     return ParsedIndexExpression(left, expr, Span(left.span.start, token_source.idx())), None
+
+
+def parse_slice_expr(left : ParsedPrimaryExpression, token_source: TokenSource) -> (ParsedSliceExpression | None, ParserError | None):
+    _, error = token_source.try_consume_token(TokenKind.LeftBracket)
+    if error: return None, error
+
+    start_expr, _ = parse_expression(token_source)
+
+    _, error = token_source.try_consume_token(TokenKind.Colon)
+    if error: return None, error
+
+    end_expr, _ = parse_expression(token_source)
+
+    _, error = token_source.try_consume_token(TokenKind.RightBracket)
+    if error: return None, error
+
+    return ParsedSliceExpression(left, start_expr, end_expr, Span(left.span.start, token_source.idx())), None
 
 
 def parse_dot_expr(left : ParsedPrimaryExpression, token_source: TokenSource) -> (ParsedDotExpression | None, ParserError | None):
@@ -721,6 +764,24 @@ def parse_while_stmt(token_source: TokenSource) -> (ParsedWhile | None, ParserEr
     return ParsedWhile(expression, block, Span(start, token_source.idx())), None
 
 
+def parse_assignment_stmt(token_source: TokenSource) -> (ParsedAssignment | None, ParserError | None):
+    start = token_source.span().start
+
+    name, error = parse_name(token_source)
+    if error: return None, error
+
+    _, error = token_source.try_consume_token(TokenKind.Equals)
+    if error: return None, error
+
+    expression, error = parse_expression(token_source)
+    if error: return None, error
+
+    token_span, error = token_source.try_consume_token(TokenKind.Newline)
+    if error: return None, error
+
+    return ParsedAssignment(name, expression, Span(start, token_source.idx())), None
+
+
 def parse_break_stmt(token_source: TokenSource) -> tuple[Optional[ParsedBreakStatement], Optional[ParserError]]:
     token_span, error = token_source.try_consume_name("break")
     if error: return None, error
@@ -842,8 +903,8 @@ def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError |
             stmt, error = parse_break_stmt(token_source)
             if error: return None, error
             stmts.append(stmt)
-        elif token_source.match_token(Token(TokenKind.Name, 'if')):
-            stmt, error = parse_if_stmt(token_source)
+        elif token_source.remaining() >= 2 and token_source.peek().token.kind == TokenKind.Name and token_source.peek(1).token.kind == TokenKind.Equals:
+            stmt, error = parse_assignment_stmt(token_source)
             if error: return None, error
             stmts.append(stmt)
         else:
