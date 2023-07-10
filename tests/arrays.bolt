@@ -1,14 +1,14 @@
 
-
-
-other() : [2]u8
+other() : [2]u8 {
     return [0, 1]
+}
 
-main() : i32
+main() : i32 {
     let a : [3]i16 = [0, 131, -3]
     let o : [2]u8 = other()
 
     return o[0]
+}
 
 
 

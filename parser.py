@@ -67,6 +67,13 @@ class TokenSource:
 
         return token_span, None
 
+    def skip(self, tokenkind: TokenKind):
+        while self.remaining() > 0:
+            token_span = self.peek()
+            if token_span.token.kind != tokenkind:
+                break
+            self.advance()
+
     def eof(self) -> bool:
         return self.peek().token.kind == TokenKind.EOF
 
@@ -346,8 +353,11 @@ def parse_primary_expr(left : ParsedPrimaryExpression | None, token_source : Tok
             if error: return None, error
             return parse_primary_expr(parsed_call, token_source)
         elif token_source.match_token(Token(TokenKind.LeftCurly)):
+            source_start = token_source.index
             parsed_struct_expression, error = parse_struct_expression(left, token_source)
-            if error: return None, error
+            if error:
+                token_source.index = source_start
+                return left, None
             return parse_primary_expr(parsed_struct_expression, token_source)
         elif token_source.match_token(Token(TokenKind.LeftBracket)):
             start_index = token_source.index
@@ -840,11 +850,10 @@ def parse_struct(token_source: TokenSource) -> (ParsedStruct | None, ParserError
 
     name = ParsedName(token_span.token.data, token_span.span)
 
-    token_span, error = token_source.try_consume_token(TokenKind.Newline)
+    token_span, error = token_source.try_consume_token(TokenKind.LeftCurly)
     if error: return None, error
 
-    token_span, error = token_source.try_consume_token(TokenKind.Indent)
-    if error: return None, error
+    token_source.skip(TokenKind.Newline)
 
     fields: list[ParsedField] = []
     structs: list[ParsedStruct] = []
@@ -866,26 +875,28 @@ def parse_struct(token_source: TokenSource) -> (ParsedStruct | None, ParserError
     if len(fields) == 0:
         return None, ParserError(f'missing struct fields', Span(token_source.idx(), token_source.idx() + 1))
 
-    token_span, error = token_source.try_consume_token(TokenKind.Dedent)
+    token_span, error = token_source.try_consume_token(TokenKind.RightCurly)
     if error: return None, error
+
+    token_source.skip(TokenKind.Newline)
 
     return ParsedStruct(name, fields, structs, Span(start, token_source.idx())), None
 
 
 def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError | None):
-    token_span, error = token_source.try_consume_token(TokenKind.Newline)
+    token_span, error = token_source.try_consume_token(TokenKind.LeftCurly)
     if error: return None, error
 
     start = token_span.span.start
 
-    token_span, error = token_source.try_consume_token(TokenKind.Indent)
-    if error: return None, error
+    token_source.skip(TokenKind.Newline)
 
     stmts: list[ParsedStatement] = []
 
     while not token_source.eof():
-        if token_source.match_token(Token(TokenKind.Dedent)):
+        if token_source.match_token(Token(TokenKind.RightCurly)):
             token_source.advance()
+            token_source.skip(TokenKind.Newline)
             break
         elif token_source.match_token(Token(TokenKind.Name, 'let')):
             stmt, error = parse_variable_declaration(token_source)
@@ -901,6 +912,10 @@ def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError |
             stmts.append(stmt)
         elif token_source.match_token(Token(TokenKind.Name, 'break')):
             stmt, error = parse_break_stmt(token_source)
+            if error: return None, error
+            stmts.append(stmt)
+        elif token_source.match_token(Token(TokenKind.Name, 'if')):
+            stmt, error = parse_if_stmt(token_source)
             if error: return None, error
             stmts.append(stmt)
         elif token_source.remaining() >= 2 and token_source.peek().token.kind == TokenKind.Name and token_source.peek(1).token.kind == TokenKind.Equals:

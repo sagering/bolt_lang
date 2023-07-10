@@ -1,8 +1,9 @@
 
-use_struct5 ( input : *ABC ) : *i32
+use_struct5 ( input : *ABC ) : *i32 {
     return &input.d[1 + 1].e
+}
 
-struct ABC
+struct ABC {
     a : i64
     b : i64
     c : i32
@@ -10,18 +11,21 @@ struct ABC
     e : *[3][2]*B
     f : []B
     g : [3][]B
+}
 
-struct B
+struct B {
     e : i32
     k : *ABC
+}
 
 let hans : i64 = 0
 let zimmer : i32 = (1 + 3) - 1 / 3
 
-use_struct6 ( input : *ABC ) : *i32
+use_struct6 ( input : *ABC ) : *i32 {
     return use_struct6( input )
+}
 
-main() : i32
+main() : i32 {
     let i : ABC = ABC {}
     return *use_struct5( &i )
-
+}

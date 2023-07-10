@@ -1,14 +1,17 @@
-extern write(fd : i32, buffer : *u8, count : u64) : u64
 
-print(str : []u8) : i32
+extern write(fd : i32, buffer : *u8, count : u64) : u64
+print(str : []u8) : i32 {
     write(1, &str[0], len(str))
     return 0
+}
 
-main() : i32
+main() : i32 {
     let arr : [7]u8 = [72, 101, 108, 108, 111, 33, 0]
     let arr_part : []u8 = arr[:5]
     let i : u8 = 0
-    while i < len(arr_part)
+    while i < len(arr_part) {
         print(arr_part)
         i = i + 1
+    }
     return 1
+}

@@ -1,14 +1,17 @@
 extern write(fd : i32, buffer : *u8, count : u64) : u64
 
-print(str : []u8) : i32
+print(str : []u8) : i32 {
     write(1, &str[0], len(str))
     return 0
+}
 
-main() : i32
+main() : i32 {
     let txt : []u8 = "This\n is the whole text"
     let txt_part : []u8 = txt[:6]
     let i : u8 = 0
-    while i < 100
+    while i < 100 {
         print(txt_part)
         i = i + 1
+    }
     return 1
+}

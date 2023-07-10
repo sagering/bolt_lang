@@ -38,7 +38,6 @@ class TokenKind(Enum):
     Comma = 11
     GreaterThan = 12
     Newline = 13
-    Indent = 14
     Dedent = 15
     Equals = 16
     EOF = 17
@@ -85,9 +84,8 @@ def lex(input : str) -> tuple[list[TokenSpan] | None, str | None]:
     tokens : list[TokenSpan] = []
     tindex = TextIndex(input, 0)
 
+    # to coalesce multiple newlines into one
     line_blank = True
-    line_start = 0
-    indent_stack = []
 
     # Append EOF
     input += chr(26)
@@ -106,24 +104,9 @@ def lex(input : str) -> tuple[list[TokenSpan] | None, str | None]:
             if not line_blank:
                 tokens.append(TokenSpan(Token(TokenKind.Newline), Span(tindex.index, tindex.index + 1)))
             tindex.index += 1
-            line_start = tindex.index
             line_blank = True
         else:
-            if line_blank:
-                col = tindex.index - line_start
-
-                if col % 4 != 0:
-                    return None, 'indentation error'
-
-                if (len(indent_stack) == 0 and col > 0) or (len(indent_stack) > 0 and indent_stack[-1] < col):
-                    tokens.append(TokenSpan(Token(TokenKind.Indent), Span(tindex.index, tindex.index + 1)))
-                    indent_stack.append(col)
-                else:
-                    while len(indent_stack) > 0 and indent_stack[-1] > col:
-                        tokens.append(TokenSpan(Token(TokenKind.Dedent), Span(tindex.index, tindex.index + 1)))
-                        indent_stack.pop()
-
-                line_blank = False
+            line_blank = False
 
             if char == '(':
                 tokens.append(TokenSpan(Token(TokenKind.LeftParen), Span(tindex.index, tindex.index + 1)))
@@ -198,10 +181,6 @@ def lex(input : str) -> tuple[list[TokenSpan] | None, str | None]:
                 tokens.append(token_span)
             else:
                 raise NotImplementedError(f"Unhandled character {char}")
-
-    while len(indent_stack) > 0:
-        tokens.append(TokenSpan(Token(TokenKind.Dedent), Span(tindex.index, tindex.index + 1)))
-        indent_stack.pop()
 
     tokens.append(TokenSpan(Token(TokenKind.EOF), Span(tindex.index, tindex.index + 1)))
 
