@@ -231,7 +231,7 @@ class ParsedBlock:
 @dataclass
 class ParsedVariableDeclaration:
     name: str
-    type: 'ParsedType'
+    type: Optional['ParsedType']
     initializer: ParsedExpression
     span: Span
 
@@ -744,8 +744,7 @@ def parse_variable_declaration(token_source: TokenSource) -> (ParsedVariableDecl
     _, error = token_source.try_consume_token(TokenKind.Colon)
     if error: return None, error
 
-    parsed_type, error = parse_type(token_source)
-    if error: return None, error
+    parsed_type, _ = parse_type(token_source)
 
     _, error = token_source.try_consume_token(TokenKind.Equals)
     if error: return None, error

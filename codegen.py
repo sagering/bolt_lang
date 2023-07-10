@@ -84,6 +84,8 @@ def codegen_prelude() -> str:
     out += '#define i16 short\n'
     out += '#define i32 int\n'
     out += '#define i64 long\n'
+    out += '#define f32 float\n'
+    out += '#define f64 double\n'
     return out
 
 
@@ -260,7 +262,11 @@ def codegen_expr(expr: ValidatedExpression) -> str:
             slice_start = codegen_expr(expr.start())
 
         if isinstance(expr.end(), SliceBoundaryPlaceholder):
-            slice_end = '(' + codegen_expr(expr.expr()) + '.length)'
+            if expr.expr().type.is_array():
+                slice_end = f'{expr.expr().type.array().length}'
+            else:
+                slice_end = '(' + codegen_expr(expr.expr()) + '.length)'
+
         else:
             slice_end = codegen_expr(expr.end())
 

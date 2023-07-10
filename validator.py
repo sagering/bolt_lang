@@ -12,7 +12,7 @@ from parser import ParsedModule, ParsedFunctionDefinition, ParsedExpression, Par
 
 from lexer import lex
 
-builtin_types = ['i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'bool']
+builtin_types = ['i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'bool', 'f32', 'f64']
 
 
 @dataclass
@@ -1164,17 +1164,24 @@ def validate_return_stmt(scope: Scope, parsed_return_stmt: ParsedReturn) -> (Val
 
 
 def validate_variable_declaration(scope: Scope, parsed_variable_decl: ParsedVariableDeclaration) -> tuple[Optional[ValidatedVariableDeclaration], Optional[ValidationError]]:
-    validated_type, error = validate_type(scope, parsed_variable_decl.type)
-    if error: return None, error
 
-    init_expr, error = validate_expression(scope, validated_type, parsed_variable_decl.initializer)
-    if error: return None, error
+    if parsed_variable_decl.type:
+        validated_type, error = validate_type(scope, parsed_variable_decl.type)
+        if error: return None, error
 
-    if not validated_type.eq_or_other_safely_convertible(init_expr.type):
-        return None, ValidationError(
-            f'Type mismatch in variable declaration: declaration type = {validated_type}, initialization type = {init_expr.type}', parsed_variable_decl.span)
+        init_expr, error = validate_expression(scope, validated_type, parsed_variable_decl.initializer)
+        if error: return None, error
 
-    return ValidatedVariableDeclaration([init_expr], parsed_variable_decl.span, parsed_variable_decl.name, validated_type), None
+        if not validated_type.eq_or_other_safely_convertible(init_expr.type):
+            return None, ValidationError(
+                f'Type mismatch in variable declaration: declaration type = {validated_type}, initialization type = {init_expr.type}', parsed_variable_decl.span)
+
+        return ValidatedVariableDeclaration([init_expr], parsed_variable_decl.span, parsed_variable_decl.name, validated_type), None
+
+    else:
+        init_expr, error = validate_expression(scope, None, parsed_variable_decl.initializer)
+        if error: return None, error
+        return ValidatedVariableDeclaration([init_expr], parsed_variable_decl.span, parsed_variable_decl.name, init_expr.type), None
 
 
 def validate_while_stmt(scope: Scope, parsed_while: ParsedWhile) -> tuple[

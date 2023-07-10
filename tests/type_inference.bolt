@@ -1,0 +1,15 @@
+
+
+struct S {
+    i0 : i32
+}
+
+main() : i32 {
+    let a := [12, 3, 4, 5]
+    let b := a[:]
+    let c := S{}
+    let d := 1
+    let e := .3
+
+    return 0
+}
