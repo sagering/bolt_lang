@@ -998,7 +998,7 @@ def validate_slice_expr(scope : Scope, type_hint: CompleteType | None, parsed_sl
     validated_expr, error = validate_expression(scope, None, parsed_slice_expr.expr)
     if error: return None, error
 
-    if not validated_expr.type.is_slice():
+    if not (validated_expr.type.is_slice() or validated_expr.type.is_array()):
         return None, ValidationError(f'Expression not sliceable', validated_expr.span)
 
     if parsed_slice_expr.start:
@@ -1626,7 +1626,7 @@ def print_validator_error(error: ValidationError, text: str):
         idx = line_span.end - 1
         line_idx += 1
 
-    print(Colors.FAIL + f'Parser error at {line_idx + 1}:{error.span.start - idx + 1}:\n' + Colors.ENDC)
+    print(Colors.FAIL + f'Validation error at {line_idx + 1}:{error.span.start - idx + 1}:\n' + Colors.ENDC)
 
     if found:
         print("...")

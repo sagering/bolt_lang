@@ -251,7 +251,6 @@ def codegen_expr(expr: ValidatedExpression) -> str:
         length = len(expr.value.encode('utf-8'))
         return f'({slice_type_name}{{&STRING_TABLE[{offset}], {length}}})'
     elif isinstance(expr, ValidatedSliceExpression):
-        source_slice = codegen_expr(expr.expr())
         slice_type_name = c_typename_with_wrapped_pointers(expr.type)
 
         # FIXME: When slicing an unnamed slice, this code creates the temporary (unnamed) slice twice.
@@ -265,7 +264,10 @@ def codegen_expr(expr: ValidatedExpression) -> str:
         else:
             slice_end = codegen_expr(expr.end())
 
-        return f'({slice_type_name}{{{source_slice}.to + {slice_start}, ({slice_end} - {slice_start})}})'
+        if expr.expr().type.is_array():
+            return f'({slice_type_name}{{(&{codegen_expr(expr.expr())}.array[0]) + {slice_start}, ({slice_end} - {slice_start})}})'
+
+        return f'({slice_type_name}{{{codegen_expr(expr.expr())}.to + {slice_start}, ({slice_end} - {slice_start})}})'
 
     else:
         raise NotImplementedError(expr)
