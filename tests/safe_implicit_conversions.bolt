@@ -16,13 +16,13 @@ take_i32( a : i32 ) : i32 {
 }
 
 main() : i32 {
-    let a : i16 = 1
-    let b : u8 = 1
-    let c : u16 = 1
-    let d : i32 = c
-    let e : i64 = a
-    let f : u32 = 1
-    let g : i64 = f
+    a : i16 = 1
+    b : u8 = 1
+    c : u16 = 1
+    d : i32 = c
+    e : i64 = a
+    f : u32 = 1
+    g : i64 = f
 
     take_u16( b )
     take_u16( c )

@@ -731,13 +731,10 @@ def parse_type(token_source : TokenSource) -> (ParsedType | None, ParserError | 
 
 
 def parse_variable_declaration(token_source: TokenSource) -> (ParsedVariableDeclaration | None, ParserError | None):
-    token_span, error = token_source.try_consume_name("let")
+    token_span, error = token_source.try_consume_token(TokenKind.Name)
     if error: return None, error
 
     start: int = token_span.span.start
-
-    token_span, error = token_source.try_consume_token(TokenKind.Name)
-    if error: return None, error
 
     name = token_span.token.data
 
@@ -897,7 +894,7 @@ def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError |
             token_source.advance()
             token_source.skip(TokenKind.Newline)
             break
-        elif token_source.match_token(Token(TokenKind.Name, 'let')):
+        elif token_source.remaining() >= 2 and token_source.peek().token.kind == TokenKind.Name and token_source.peek(1).token.kind == TokenKind.Colon:
             stmt, error = parse_variable_declaration(token_source)
             if error: return None, error
             stmts.append(stmt)
@@ -1060,7 +1057,7 @@ def parse_module(token_source: TokenSource) -> (ParsedModule | None, ParserError
             struct, error = parse_struct(token_source)
             if error: return None, error
             body.append(struct)
-        elif token.kind == TokenKind.Name and token.data == 'let':
+        elif token_source.remaining() >= 2 and token_source.peek().token.kind == TokenKind.Name and token_source.peek(1).token.kind == TokenKind.Colon:
             variable_decl, error = parse_variable_declaration(token_source)
             if error: return None, error
             body.append(variable_decl)

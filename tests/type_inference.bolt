@@ -5,11 +5,11 @@ struct S {
 }
 
 main() : i32 {
-    let a := [12, 3, 4, 5]
-    let b := a[:]
-    let c := S{}
-    let d := 1
-    let e := .3
+    a := [12, 3, 4, 5]
+    b := a[:]
+    c := S{}
+    d := 1
+    e := .3
 
     return 0
 }

@@ -9,33 +9,33 @@ struct E {
 }
 
 use_struct ( input : *ABC ) : ABC {
-    let c : ABC = ABC {}
+    c : ABC = ABC {}
     return c
 }
 
 use_struct1 ( input : *[3]ABC ) : ABC {
-    let c : ABC = ABC {}
+    c : ABC = ABC {}
     return c
 }
 
 use_struct2 ( input : *[]ABC ) : ABC {
-    let c : ABC = ABC {}
+    c : ABC = ABC {}
     return c
 }
 
 use_struct3 ( input : [2]ABC ) : ABC {
-    let c : ABC = ABC {}
+    c : ABC = ABC {}
     return c
 }
 
 my_function( a : i64 ) : bool {
-    let b : i64 = 1
+    b : i64 = 1
     return a * b == 3
 }
 
 funky( c : i64 ) : i64 {
 
-    let d : ABC = ABC {}
+    d : ABC = ABC {}
 
     if c == -1 {
         return 0
@@ -51,8 +51,8 @@ funky( c : i64 ) : i64 {
 main() : i32 {
     funky( 938 )
 
-    let a : ABC = ABC{}
-    let b : E = E{}
+    a : ABC = ABC{}
+    b : E = E{}
 
     if my_function( 3 ) {
         return b.e

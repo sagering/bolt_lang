@@ -18,14 +18,14 @@ struct B {
     k : *ABC
 }
 
-let hans : i64 = 0
-let zimmer : i32 = (1 + 3) - 1 / 3
+hans : i64 = 0
+zimmer : i32 = (1 + 3) - 1 / 3
 
 use_struct6 ( input : *ABC ) : *i32 {
     return use_struct6( input )
 }
 
 main() : i32 {
-    let i : ABC = ABC {}
+    i : ABC = ABC {}
     return *use_struct5( &i )
 }

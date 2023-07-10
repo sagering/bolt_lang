@@ -6,9 +6,9 @@ print(str : []u8) : i32 {
 }
 
 main() : i32 {
-    let txt : []u8 = "This\n is the whole text"
-    let txt_part : []u8 = txt[:6]
-    let i : u8 = 0
+    txt : []u8 = "This\n is the whole text"
+    txt_part : []u8 = txt[:6]
+    i : u8 = 0
     while i < 100 {
         print(txt_part)
         i = i + 1
