@@ -1,15 +1,14 @@
 from lexer import lex
-from typing import Union
 from parser import TokenSource, parse_module, print_parser_error
 from validator import validate_module
 from collections import defaultdict
-from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedBlock, ValidatedReturnStatement, \
-    ValidatedVariableDeclaration, ValidatedWhileStatement, ValidatedBreakStatement, ValidatedIfStatement, \
-    ValidatedExpression, ValidatedNameExpr, ValidatedNumber, ValidatedCall, ValidatedBinaryOperation, \
-    ValidatedUnaryOperation, ValidatedDotExpression, ValidatedIndexExpression, ValidatedStructExpression,\
-    ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, ValidatedField, ValidatedReturnType, \
-    ValidatedParameter, ValidatedArray,  ValidatedExternFunctionDeclaration, ValidatedString, \
-    ValidatedSliceExpression, SliceBoundaryPlaceholder, ValidatedAssignment
+from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedReturnStmt, \
+    ValidatedVariableDeclarationStmt, ValidatedWhileStmt, ValidatedBreakStmt, ValidatedIfStmt, \
+    ValidatedExpression, ValidatedNameExpr, ValidatedValueExpr, ValidatedCallExpr, ValidatedBinaryOperationExpr, \
+    ValidatedUnaryOperationExpr, ValidatedDotExpr, ValidatedIndexExpr, ValidatedInitializerExpr,\
+    ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, \
+    ValidatedArrayExpr,  ValidatedExternFunctionDeclaration, \
+    ValidatedSliceExpr, SliceBoundaryPlaceholder, ValidatedAssignmentStmt, Struct
 
 
 string_table : dict[str, int] = dict()
@@ -32,11 +31,8 @@ def c_typename_with_wrapped_pointers(complete_type: CompleteType) -> str:
     if complete_type.is_array():
         return f'ARRAY_{complete_type.array().length}_' + c_typename_with_wrapped_pointers(complete_type.next)
 
-    if complete_type.is_builtin():
-        return complete_type.builtin().name
-
-    if complete_type.is_struct():
-        return complete_type.struct().location.replace('.', '_') + '_' + complete_type.struct().name
+    if complete_type.is_named_type():
+        return complete_type.named_type().name
 
     raise NotImplementedError(complete_type)
 
@@ -137,7 +133,7 @@ def codegen_string_table() -> str:
     return out
 
 
-def codegen_struct_definitions(type_dict: dict[str, CompleteType]) -> str:
+def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: dict[str, Struct]) -> str:
     # Build a dependency graph between the structs.
     out_edges = defaultdict(list)
     in_edges = defaultdict(list)
@@ -149,8 +145,9 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType]) -> str:
         if type.is_pointer() or type.is_slice():
             continue
 
-        if type.is_struct():
-            for field in type.struct().fields:
+        if type.is_named_type() and not type.is_builtin():
+            struct = type_infos[type.named_type().name]
+            for field in struct.fields:
 
                 if field.type.is_pointer() or field.type.is_slice() or field.type.is_builtin():
                     continue
@@ -166,6 +163,10 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType]) -> str:
         if len(out_edges[key]) == 0:
             no_dependency.add(key)
 
+    # print(out_edges)
+    # print(in_edges)
+    # print(no_dependency)
+
     # Kahn's algorithm for topological sorting.
     ordered = []
     while len(no_dependency) > 0:
@@ -177,6 +178,9 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType]) -> str:
                 no_dependency.add(other)
 
         ordered.append(type_id)
+    #
+    # print(out_edges)
+    # print(in_edges)
 
     # Dependency graph has cycles there are any edges left, i.e. if any of node's out edge list is not empty.
     # This is not supposed to happen because the types should have been checked already in the validate step.
@@ -190,8 +194,8 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType]) -> str:
         if type.is_builtin() or type.is_function_ptr():
             continue
 
-        if type.is_struct():
-            struct = type.struct()
+        if type.is_named_type():
+            struct = type_infos[type.named_type().name]
 
             out += f'struct {c_typename_with_wrapped_pointers(type)} {{\n'
             for field in struct.fields:
@@ -221,38 +225,41 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType]) -> str:
 
     return out
 
+def expr_is_string(expr : ValidatedExpression):
+    return isinstance(expr, ValidatedValueExpr) and expr.type.is_slice() and expr.type.next.is_named_type() and expr.type.next.named_type().name == 'u8'
+
 
 def codegen_expr(expr: ValidatedExpression) -> str:
-    if isinstance(expr, ValidatedNumber):
+    if isinstance(expr, ValidatedValueExpr) and expr.type.is_number():
         return f'({expr.value})'
     elif isinstance(expr, ValidatedNameExpr):
         return f'{expr.name}'
-    elif isinstance(expr, ValidatedUnaryOperation):
-        return f'({expr.op.op.literal()}{codegen_expr(expr.rhs())})'
-    elif isinstance(expr, ValidatedBinaryOperation):
-        return f'({codegen_expr(expr.lhs())}{expr.op.op.literal()}{codegen_expr(expr.rhs())})'
-    elif isinstance(expr, ValidatedCall):
+    elif isinstance(expr, ValidatedUnaryOperationExpr):
+        return f'({expr.op.literal()}{codegen_expr(expr.rhs())})'
+    elif isinstance(expr, ValidatedBinaryOperationExpr):
+        return f'({codegen_expr(expr.lhs())}{expr.op.literal()}{codegen_expr(expr.rhs())})'
+    elif isinstance(expr, ValidatedCallExpr):
         if expr.expr().name == 'len':
             return f'({codegen_expr(expr.args()[0])}.length)'
         return f'({codegen_expr(expr.expr())}({",".join([codegen_expr(arg) for arg in expr.args()])}))'
-    elif isinstance(expr, ValidatedDotExpression):
+    elif isinstance(expr, ValidatedDotExpr):
         deref = '*' if expr.auto_deref else ''
         return f'(({deref}{codegen_expr(expr.expr())}).{expr.name().name})'
-    elif isinstance(expr, ValidatedStructExpression):
+    elif isinstance(expr, ValidatedInitializerExpr):
         return f'({c_typename_with_ptrs(expr.type)}' + '{})'
-    elif isinstance(expr, ValidatedIndexExpression):
+    elif isinstance(expr, ValidatedIndexExpr):
         if expr.expr().type.is_slice():
             return f'({codegen_expr(expr.expr())}.to[{codegen_expr(expr.index())}])'
         return f'({codegen_expr(expr.expr())}.array[{codegen_expr(expr.index())}])'
-    elif isinstance(expr, ValidatedArray):
+    elif isinstance(expr, ValidatedArrayExpr):
         array_type_name = c_typename_with_wrapped_pointers(expr.type)
         return f'({array_type_name}{{{{ {",".join(codegen_expr(expr) for expr in expr.children)} }}}})'
-    elif isinstance(expr, ValidatedString):
+    elif expr_is_string(expr):
         slice_type_name = c_typename_with_wrapped_pointers(expr.type)
         offset = string_table[expr.value]
         length = len(expr.value.encode('utf-8'))
         return f'({slice_type_name}{{&STRING_TABLE[{offset}], {length}}})'
-    elif isinstance(expr, ValidatedSliceExpression):
+    elif isinstance(expr, ValidatedSliceExpr):
         slice_type_name = c_typename_with_wrapped_pointers(expr.type)
 
         # FIXME: When slicing an unnamed slice, this code creates the temporary (unnamed) slice twice.
@@ -281,8 +288,8 @@ def codegen_expr(expr: ValidatedExpression) -> str:
 
 def codegen_function_definition(validated_function_definition : ValidatedFunctionDefinition, predeclaration : bool) -> str:
     out = ''
-    pars = ','.join([f'{c_typename_with_ptrs(par.type)} {par.name}' for par in validated_function_definition.pars()])
-    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().type)} {validated_function_definition.name().name}({pars})'
+    pars = ','.join([f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in validated_function_definition.pars()])
+    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().value)} {validated_function_definition.name().name}({pars})'
 
     if predeclaration:
         out += ';\n'
@@ -297,8 +304,8 @@ def codegen_function_definition(validated_function_definition : ValidatedFunctio
 
 def codegen_extern_function_declaration(validated_extern_function_decl : ValidatedExternFunctionDeclaration) -> str:
     out = 'extern "C" '
-    pars = ','.join([f'{c_typename_with_ptrs(par.type)} {par.name}' for par in validated_extern_function_decl.pars()])
-    out += f'{c_typename_with_ptrs(validated_extern_function_decl.return_type().type)} {validated_extern_function_decl.name().name} ({pars})'
+    pars = ','.join([f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in validated_extern_function_decl.pars()])
+    out += f'{c_typename_with_ptrs(validated_extern_function_decl.return_type().value)} {validated_extern_function_decl.name().name} ({pars})'
     out += ';\n'
     return out
 
@@ -306,24 +313,25 @@ def codegen_extern_function_declaration(validated_extern_function_decl : Validat
 def codegen_stmt(stmt: ValidatedStatement) -> str:
     out = ''
     if isinstance(stmt, ValidatedFunctionDefinition):
+        if stmt.is_comptime: return ''
         out += codegen_function_definition(stmt, False)
-    elif isinstance(stmt, ValidatedVariableDeclaration):
-        out += f'{c_typename_with_ptrs(stmt.type)} {stmt.name} = {codegen_expr(stmt.expr())};\n'
-    elif isinstance(stmt, ValidatedReturnStatement):
+    elif isinstance(stmt, ValidatedVariableDeclarationStmt):
+        out += f'{c_typename_with_ptrs(stmt.type_expr().value)} {stmt.name} = {codegen_expr(stmt.initializer())};\n'
+    elif isinstance(stmt, ValidatedReturnStmt):
         out += f'return {codegen_expr(stmt.expr())};\n'
-    elif isinstance(stmt, ValidatedBreakStatement):
+    elif isinstance(stmt, ValidatedBreakStmt):
         out += 'break;\n'
-    elif isinstance(stmt, ValidatedWhileStatement):
+    elif isinstance(stmt, ValidatedWhileStmt):
         out += f'while ({codegen_expr(stmt.condition())}) {{\n'
         for substmt in stmt.block().statements():
             out += codegen_stmt(substmt)
         out += '}\n'
-    elif isinstance(stmt, ValidatedIfStatement):
+    elif isinstance(stmt, ValidatedIfStmt):
         out += f'if ({codegen_expr(stmt.condition())}) {{\n'
         for substmt in stmt.block().statements():
             out += codegen_stmt(substmt)
         out += '}\n'
-    elif isinstance(stmt, ValidatedAssignment):
+    elif isinstance(stmt, ValidatedAssignmentStmt):
         out += f'{codegen_expr(stmt.name())} = {codegen_expr(stmt.expr())};'
     elif isinstance(stmt, ValidatedExpression):
         out += codegen_expr(stmt) + ';\n'
@@ -336,7 +344,7 @@ def codegen_stmt(stmt: ValidatedStatement) -> str:
 def codegen_variable_definitions(validated_module : ValidatedModule) -> str:
     out = '// VARIABLE DEFINITIONS\n'
     for stmt in validated_module.body():
-        if isinstance(stmt, ValidatedVariableDeclaration):
+        if isinstance(stmt, ValidatedVariableDeclarationStmt):
             out += codegen_stmt(stmt)
     return out
 
@@ -345,6 +353,7 @@ def codegen_function_predeclarations(validated_module: ValidatedModule) -> str:
     out = '// FUNCTION PRE-DECLARATIONS\n'
     for stmt in validated_module.body():
         if isinstance(stmt, ValidatedFunctionDefinition):
+            if stmt.is_comptime: continue
             out += codegen_function_definition(stmt, predeclaration=True)
         elif isinstance(stmt, ValidatedExternFunctionDeclaration):
             out += codegen_extern_function_declaration(stmt)
@@ -364,19 +373,36 @@ def codegen_module(validated_module: ValidatedModule) -> str:
 
     type_dict = {}
 
-    # Collect all types that we encounter in this module.
-    def collect_type(node : ValidatedNode) -> None:
-        TypedNodes = Union[ValidatedField, ValidatedReturnType, ValidatedParameter, ValidatedVariableDeclaration]
-        if isinstance(node, TypedNodes):
-            node.type.collect_downstream_types(type_dict)
-        elif hasattr(node, 'type'):
-            node.type.collect_downstream_types(type_dict)
+    # Collect all strings.
+    def collect_types(node : ValidatedNode) -> None:
+        if isinstance(node, ValidatedValueExpr) and node.type.is_type():
+            type = node.value
+            while type:
+                type_dict[type.to_string()] = type
+                type = type.next
 
-    visit_nodes(validated_module, collect_type)
+    visit_nodes(validated_module, collect_types)
+
+    # Collect all structs from all scopes
+    type_infos = {}
+
+    scopes = [validated_module.scope]
+    while len(scopes) > 0:
+        scope = scopes.pop()
+        type_infos.update(scope.type_infos)
+        for child in scope.children:
+            scopes.append(child)
+
+    for type_info in type_infos.values():
+        for field in type_info.fields:
+            type = field.type
+            while type:
+                type_dict[type.to_string()] = type
+                type = type.next
 
     # Collect all strings.
     def collect_string(node : ValidatedNode) -> None:
-        if isinstance(node, ValidatedString):
+        if isinstance(node, ValidatedExpression) and expr_is_string(node):
             if node.value in string_table:
                 return
             string_table[node.value] = len(string_table)
@@ -388,7 +414,7 @@ def codegen_module(validated_module: ValidatedModule) -> str:
     out += codegen_struct_predeclarations(type_dict)
     out += codegen_slices(type_dict)
     out += codegen_string_table()
-    out += codegen_struct_definitions(type_dict)
+    out += codegen_struct_definitions(type_dict, type_infos)
     out += codegen_variable_definitions(validated_module)
     out += codegen_function_predeclarations(validated_module)
     out += codegen_function_definitions(validated_module)

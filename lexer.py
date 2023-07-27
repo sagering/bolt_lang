@@ -51,6 +51,7 @@ class TokenKind(Enum):
     Dot = 23
     String = 23
     LessThan = 24
+    At = 25
 
 
 @dataclass
@@ -158,6 +159,9 @@ def lex(input : str) -> tuple[list[TokenSpan] | None, str | None]:
                 tindex.index += 1
             elif char == '&':
                 tokens.append(TokenSpan(Token(TokenKind.Ampersand), Span(tindex.index, tindex.index + 1)))
+                tindex.index += 1
+            elif char == '@':
+                tokens.append(TokenSpan(Token(TokenKind.At), Span(tindex.index, tindex.index + 1)))
                 tindex.index += 1
             elif char == '"':
                 token_span, error = lex_string(tindex)

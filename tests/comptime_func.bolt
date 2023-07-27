@@ -1,0 +1,24 @@
+@List(capacity : u32, T: type) : type {
+    return struct {
+        items : [capacity]T
+        size  : u32
+    }
+}
+
+@Inner(T: type) : type {
+    return struct {
+        val : T
+    }
+}
+
+main() : i32 {
+    p := List(10, i32) {}
+    q := List(10, i32) {}
+
+    p = q
+
+    l := Inner(i32) {}
+    m := List(10, Inner(u32)) {}
+
+    return 0
+}

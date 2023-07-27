@@ -133,6 +133,18 @@ class ParsedOperator:
     span: Span
 
 
+class ComplexOperator(Enum):
+    Array = 1
+    Slice = 2
+
+
+@dataclass
+class ParsedComplexOperator:
+    op: ComplexOperator
+    par: Optional['ParsedExpression']
+    span: Span
+
+
 @dataclass
 class ParsedNumber:
     value: str
@@ -149,7 +161,7 @@ class ParsedName:
 @dataclass
 class ParsedUnaryOperation:
     rhs: 'ParsedExpression'
-    op: ParsedOperator
+    op: ParsedOperator | ParsedComplexOperator
     span: Span
 
 
@@ -191,7 +203,7 @@ class ParsedDotExpression:
 
 
 @dataclass
-class ParsedStructExpression:
+class ParsedInitializerExpression:
     expr : 'ParsedExpression'
     span : Span
 
@@ -208,9 +220,23 @@ class ParsedString:
     span : Span
 
 
+@dataclass
+class ParsedField:
+    name: ParsedName
+    type: 'ParsedExpression'
+    span : Span
+
+
+@dataclass
+class ParsedStructExpression:
+    name: Optional[ParsedName]
+    fields: list[ParsedField]
+    span: Span
+
+
 ParsedAtom = Union[ParsedName, ParsedNumber, ParsedArray, ParsedString]
 
-ParsedPrimaryExpression = Union[ParsedCall, ParsedIndexExpression, ParsedSliceExpression, ParsedDotExpression, ParsedStructExpression, ParsedAtom]
+ParsedPrimaryExpression = Union[ParsedCall, ParsedIndexExpression, ParsedSliceExpression, ParsedDotExpression, ParsedInitializerExpression, ParsedAtom, ParsedStructExpression]
 
 ParsedExpression = Union[ParsedUnaryOperation, ParsedBinaryOperation, ParsedPrimaryExpression]
 
@@ -218,7 +244,7 @@ ParsedExpression = Union[ParsedUnaryOperation, ParsedBinaryOperation, ParsedPrim
 @dataclass
 class ParsedParameter:
     name: ParsedName
-    type: 'ParsedType'
+    type: 'ParsedExpression'
     span: Span
 
 
@@ -231,7 +257,7 @@ class ParsedBlock:
 @dataclass
 class ParsedVariableDeclaration:
     name: str
-    type: Optional['ParsedType']
+    type: Optional['ParsedExpression']
     initializer: ParsedExpression
     span: Span
 
@@ -254,8 +280,9 @@ class ParsedWhile:
 class ParsedFunctionDefinition:
     name: ParsedName
     pars: list[ParsedParameter]
-    return_type: 'ParsedType'
+    return_type: 'ParsedExpression'
     body: ParsedBlock
+    is_comptime : bool
     span: Span
 
 
@@ -263,22 +290,7 @@ class ParsedFunctionDefinition:
 class ParsedExternFunctionDeclaration:
     name: ParsedName
     pars: list[ParsedParameter]
-    return_type: 'ParsedType'
-    span: Span
-
-
-@dataclass
-class ParsedField:
-    name: ParsedName
-    type: 'ParsedType'
-    span : Span
-
-
-@dataclass
-class ParsedStruct:
-    name: ParsedName
-    fields: list[ParsedField]
-    structs: list['ParsedStruct']
+    return_type: 'ParsedExpression'
     span: Span
 
 
@@ -301,9 +313,9 @@ class ParsedIfStatement:
 
 
 ParsedStatement = Union[
-    ParsedReturn, ParsedFunctionDefinition, ParsedVariableDeclaration, ParsedAssignment, ParsedWhile, ParsedExpression, ParsedBreakStatement, ParsedIfStatement, ParsedStruct]
+    ParsedReturn, ParsedFunctionDefinition, ParsedVariableDeclaration, ParsedAssignment, ParsedWhile, ParsedExpression, ParsedBreakStatement, ParsedIfStatement]
 
-ParsedDeclDef = Union[ParsedFunctionDefinition, ParsedStruct, ParsedVariableDeclaration, ParsedExternFunctionDeclaration]
+ParsedDeclDef = Union[ParsedFunctionDefinition, ParsedStructExpression, ParsedVariableDeclaration, ParsedExternFunctionDeclaration]
 
 @dataclass
 class ParsedModule:
@@ -354,7 +366,7 @@ def parse_primary_expr(left : ParsedPrimaryExpression | None, token_source : Tok
             return parse_primary_expr(parsed_call, token_source)
         elif token_source.match_token(Token(TokenKind.LeftCurly)):
             source_start = token_source.index
-            parsed_struct_expression, error = parse_struct_expression(left, token_source)
+            parsed_struct_expression, error = parse_initializer_expression(left, token_source)
             if error:
                 token_source.index = source_start
                 return left, None
@@ -372,6 +384,12 @@ def parse_primary_expr(left : ParsedPrimaryExpression | None, token_source : Tok
             return parse_primary_expr(expr, token_source)
         else:
             return left, None
+
+    if token_source.match_name('struct'):
+        parsed_struct_expr, error = parse_struct_expression(token_source)
+        if error:
+            return None, error
+        return parse_primary_expr(parsed_struct_expr, token_source)
 
     token, span = token_source.peek()
     start = span.start
@@ -397,6 +415,31 @@ def parse_operand(token_source: TokenSource) -> (ParsedExpression | None, Parser
     (token, span) = token_source.peek()
     start = span.start
     kind = token.kind
+
+    def parse_array_or_slice_type_expr(token_source: TokenSource) -> (ParsedExpression | None, ParserError | None):
+        token_span, error = token_source.try_consume_token(TokenKind.LeftBracket)
+        start = token_span.span.start
+
+        token_span_right_bracket, error = token_source.try_consume_token(TokenKind.RightBracket)
+
+        expr = None
+        if error:
+            expr, error = parse_expression(token_source)
+            if error: return None, error
+
+            token_span_right_bracket, error = token_source.try_consume_token(TokenKind.RightBracket)
+            if error: return None, error
+
+        operand, error = parse_operand(token_source)
+        if error: return None, error
+
+        operator_span = Span(start, token_span_right_bracket.span.end)
+        if expr:
+            return ParsedUnaryOperation(operand, ParsedComplexOperator(ComplexOperator.Array, expr, operator_span),
+                                        Span(start, token_source.idx())), None
+
+        return ParsedUnaryOperation(operand, ParsedComplexOperator(ComplexOperator.Slice, None, operator_span),
+                                    Span(start, token_source.idx())), None
 
     match kind:
         case TokenKind.LeftParen:
@@ -445,6 +488,19 @@ def parse_operand(token_source: TokenSource) -> (ParsedExpression | None, Parser
             if error: return None, error
 
             return ParsedUnaryOperation(operand, op, Span(start, token_source.idx())), None
+
+        case TokenKind.LeftBracket:
+            start_index = token_source.index
+            expr, first_error = parse_array_or_slice_type_expr(token_source)
+
+            if first_error:
+                token_source.index = start_index
+                expr, second_error = parse_primary_expr(None, token_source)
+                if second_error:
+                    return None, first_error
+                return expr, None
+
+            return expr, None
 
         case _:
             return parse_primary_expr(None, token_source)
@@ -537,17 +593,18 @@ def parse_array(token_source: TokenSource) -> (ParsedArray | None, ParserError |
     _, error = token_source.try_consume_token(TokenKind.RightBracket)
     if error: return None, error
 
+
     return ParsedArray(exprs, Span(start, token_source.idx())), None
 
 
-def parse_struct_expression(parsed_expr: ParsedPrimaryExpression, token_source: TokenSource) -> (ParsedStructExpression | None, ParserError | None):
+def parse_initializer_expression(parsed_expr: ParsedPrimaryExpression, token_source: TokenSource) -> (ParsedInitializerExpression | None, ParserError | None):
     _, error = token_source.try_consume_token(TokenKind.LeftCurly)
     if error: return None, error
 
     _, error = token_source.try_consume_token(TokenKind.RightCurly)
     if error: return None, error
 
-    return ParsedStructExpression(parsed_expr, Span(parsed_expr.span.start, token_source.idx())), None
+    return ParsedInitializerExpression(parsed_expr, Span(parsed_expr.span.start, token_source.idx())), None
 
 
 def parse_expression(token_source: TokenSource) -> (ParsedExpression | None, ParserError | None):
@@ -637,99 +694,6 @@ def parse_return_stmt(token_source: TokenSource) -> (ParsedReturn | None, Parser
     return ParsedReturn(parsed_expr, Span(start, token_source.idx())), None
 
 
-@dataclass
-class ParsedArrayType:
-    parsed_type : 'ParsedType'
-    length : ParsedExpression
-    span : Span
-
-
-@dataclass
-class ParsedPointerType:
-    parsed_type : 'ParsedType'
-    span : Span
-
-
-@dataclass
-class ParsedSliceType:
-    parsed_type : 'ParsedType'
-    span : Span
-
-
-ParsedTypeLiteral = Union[ParsedArrayType, ParsedPointerType, ParsedSliceType]
-ParsedType = Union[ParsedTypeLiteral, ParsedExpression]
-
-
-def parse_pointer_type(token_source : TokenSource) -> (ParsedPointerType | None, ParserError | None):
-    token_span, error = token_source.try_consume_token(TokenKind.Asterisk)
-    if error: return None, error
-
-    start = token_span.span.start
-
-    parsed_type, error = parse_type(token_source)
-    if error: return None, error
-
-    return ParsedPointerType(parsed_type, Span(start, token_source.idx())), None
-
-
-# array : [3]i32
-def parse_array_type(token_source: TokenSource) -> (ParsedArrayType | None, ParserError | None):
-    token_span, error = token_source.try_consume_token(TokenKind.LeftBracket)
-    if error: return None, error
-
-    start = token_span.span.start
-
-    length_expr, error = parse_expression(token_source)
-    if error: return None, error
-
-    token_span, error = token_source.try_consume_token(TokenKind.RightBracket)
-    if error: return None, error
-
-    parsed_type, error = parse_type(token_source)
-    if error: return None, error
-
-    return ParsedArrayType(parsed_type, length_expr, Span(start, token_source.idx())), None
-
-
-# slice : []i32
-def parse_slice_type(token_source : TokenSource) -> (ParsedSliceType | None, ParserError | None):
-    token_span, error = token_source.try_consume_token(TokenKind.LeftBracket)
-    if error: return None, error
-
-    start = token_span.span.start
-
-    token_span, error = token_source.try_consume_token(TokenKind.RightBracket)
-    if error: return None, error
-
-    parsed_type, error = parse_type(token_source)
-    if error: return None, error
-
-    return ParsedSliceType(parsed_type, Span(start, token_source.idx())), None
-
-
-def parse_type_literal(token_source : TokenSource) -> (ParsedTypeLiteral | None, ParserError | None):
-    kind = token_source.peek().token.kind
-
-    match kind:
-        case TokenKind.Asterisk:
-            return parse_pointer_type(token_source)
-        case TokenKind.LeftBracket:
-            if token_source.peek(1).token.kind == TokenKind.RightBracket:
-                return parse_slice_type(token_source)
-            else:
-                return parse_array_type(token_source)
-        case _:
-            return None, ParserError('expect "*" or "[" in type literal', token_source.span())
-
-
-def parse_type(token_source : TokenSource) -> (ParsedType | None, ParserError | None):
-    match token_source.peek().token.kind:
-        case TokenKind.Name:
-            return parse_expression(token_source)
-        case _:
-            return parse_type_literal(token_source)
-
-
 def parse_variable_declaration(token_source: TokenSource) -> (ParsedVariableDeclaration | None, ParserError | None):
     token_span, error = token_source.try_consume_token(TokenKind.Name)
     if error: return None, error
@@ -741,7 +705,7 @@ def parse_variable_declaration(token_source: TokenSource) -> (ParsedVariableDecl
     _, error = token_source.try_consume_token(TokenKind.Colon)
     if error: return None, error
 
-    parsed_type, _ = parse_type(token_source)
+    parsed_type_expr, _ = parse_expression(token_source)
 
     _, error = token_source.try_consume_token(TokenKind.Equals)
     if error: return None, error
@@ -752,7 +716,7 @@ def parse_variable_declaration(token_source: TokenSource) -> (ParsedVariableDecl
     _, error = token_source.try_consume_token(TokenKind.Newline)
     if error: return None, error
 
-    return ParsedVariableDeclaration(name, parsed_type, expression, Span(start, token_source.idx())), None
+    return ParsedVariableDeclaration(name, parsed_type_expr, expression, Span(start, token_source.idx())), None
 
 
 def parse_while_stmt(token_source: TokenSource) -> (ParsedWhile | None, ParserError | None):
@@ -826,25 +790,27 @@ def parse_struct_field(token_source : TokenSource) -> (ParsedField | None, Parse
     token_span, error = token_source.try_consume_token(TokenKind.Colon)
     if error: return None, error
 
-    parsed_type, error = parse_type(token_source)
+    parsed_type_expr, error = parse_expression(token_source)
     if error: return None, error
 
     token_span, error = token_source.try_consume_token(TokenKind.Newline)
     if error: return None, error
 
-    return ParsedField(name, parsed_type, Span(start, token_source.idx())), None
+    return ParsedField(name, parsed_type_expr, Span(start, token_source.idx())), None
 
 
-def parse_struct(token_source: TokenSource) -> (ParsedStruct | None, ParserError | None):
+def parse_struct_expression(token_source: TokenSource) -> (ParsedStructExpression | None, ParserError | None):
     token_span, error = token_source.try_consume_name("struct")
     if error: return None, error
 
     start = token_span.span.start
 
     token_span, error = token_source.try_consume_token(TokenKind.Name)
-    if error: return None, error
 
-    name = ParsedName(token_span.token.data, token_span.span)
+    if token_span:
+        name = ParsedName(token_span.token.data, token_span.span)
+    else:
+        name = None
 
     token_span, error = token_source.try_consume_token(TokenKind.LeftCurly)
     if error: return None, error
@@ -852,16 +818,9 @@ def parse_struct(token_source: TokenSource) -> (ParsedStruct | None, ParserError
     token_source.skip(TokenKind.Newline)
 
     fields: list[ParsedField] = []
-    structs: list[ParsedStruct] = []
 
     while not token_source.eof():
-
-        if token_source.match_name('struct'):
-            parsed_struct, error = parse_struct(token_source)
-            if error: return None, error
-            structs.append(parsed_struct)
-        # any other name
-        elif token_source.match_name():
+        if token_source.match_name():
             parsed_field, error = parse_struct_field(token_source)
             if error: return None, error
             fields.append(parsed_field)
@@ -874,9 +833,7 @@ def parse_struct(token_source: TokenSource) -> (ParsedStruct | None, ParserError
     token_span, error = token_source.try_consume_token(TokenKind.RightCurly)
     if error: return None, error
 
-    token_source.skip(TokenKind.Newline)
-
-    return ParsedStruct(name, fields, structs, Span(start, token_source.idx())), None
+    return ParsedStructExpression(name, fields, Span(start, token_source.idx())), None
 
 
 def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError | None):
@@ -942,10 +899,10 @@ def parse_parameter(token_source: TokenSource) -> [ParsedParameter, ParserError]
     _, error = token_source.try_consume_token(TokenKind.Colon)
     if error: return None, error
 
-    parsed_type, error = parse_type(token_source)
+    parsed_type_expr, error = parse_expression(token_source)
     if error: return None, error
 
-    return ParsedParameter(par_name, parsed_type, Span(start, token_source.idx())), None
+    return ParsedParameter(par_name, parsed_type_expr, Span(start, token_source.idx())), None
 
 
 def parse_extern_function_declaration(token_source: TokenSource) -> (ParsedExternFunctionDeclaration | None, ParserError | None):
@@ -987,32 +944,29 @@ def parse_extern_function_declaration(token_source: TokenSource) -> (ParsedExter
     if error: return None, error
 
     # type
-    parsed_type, error = parse_type(token_source)
+    parsed_type_expr, error = parse_expression(token_source)
     if error: return None, error
 
     token_span, error = token_source.try_consume_token(TokenKind.Newline)
     if error: return None, error
 
-    return ParsedExternFunctionDeclaration(name, pars, parsed_type, Span(start, token_source.idx())), None
+    return ParsedExternFunctionDeclaration(name, pars, parsed_type_expr, Span(start, token_source.idx())), None
 
 
 def parse_function_definition(token_source: TokenSource) -> (ParsedFunctionDefinition | None, ParserError | None):
-    # name = def
-    # token_span, error = token_source.try_consume_name("def")
-    # if error: return None, error
+    # @
+    is_comptime = False
+
+    token_span, error = token_source.try_consume_token(TokenKind.At)
+    if not error:
+        is_comptime = True
 
     # name
     token_span, error = token_source.try_consume_token(TokenKind.Name)
     if error: return None, error
+
     name = ParsedName(token_span.token.data, token_span.span)
     start = token_span.span.start
-    is_extern = False
-
-    if name.value == 'extern':
-        is_extern = True
-        token_span, error = token_source.try_consume_token(TokenKind.Name)
-        if error: return None, error
-        name = ParsedName(token_span.token.data, token_span.span)
 
     # (
     token_span, error = token_source.try_consume_token(TokenKind.LeftParen)
@@ -1038,14 +992,14 @@ def parse_function_definition(token_source: TokenSource) -> (ParsedFunctionDefin
     if error: return None, error
 
     # type
-    parsed_type, error = parse_type(token_source)
+    parsed_type_expr, error = parse_expression(token_source)
     if error: return None, error
 
     # body
     block, error = parse_block(token_source)
     if error: return None, error
 
-    return ParsedFunctionDefinition(name, pars, parsed_type, block, Span(start, token_source.idx())), None
+    return ParsedFunctionDefinition(name, pars, parsed_type_expr, block, is_comptime, Span(start, token_source.idx())), None
 
 
 def parse_module(token_source: TokenSource) -> (ParsedModule | None, ParserError | None):
@@ -1054,7 +1008,7 @@ def parse_module(token_source: TokenSource) -> (ParsedModule | None, ParserError
     while not token_source.eof():
         (token, span) = token_source.peek()
         if token.kind == TokenKind.Name and token.data == 'struct':
-            struct, error = parse_struct(token_source)
+            struct, error = parse_struct_expression(token_source)
             if error: return None, error
             body.append(struct)
         elif token_source.remaining() >= 2 and token_source.peek().token.kind == TokenKind.Name and token_source.peek(1).token.kind == TokenKind.Colon:
@@ -1065,7 +1019,7 @@ def parse_module(token_source: TokenSource) -> (ParsedModule | None, ParserError
             extern_function_declaration, error = parse_extern_function_declaration(token_source)
             if error: return None, error
             body.append(extern_function_declaration)
-        elif token.kind == TokenKind.Name:
+        elif token.kind == TokenKind.At or token.kind == TokenKind.Name:
             function_definition, error = parse_function_definition(token_source)
             if error: return None, error
             body.append(function_definition)

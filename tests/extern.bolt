@@ -10,6 +10,6 @@ print(str : []u8) : i32 {
 main() : i32 {
     pathname : []u8 = "/home/build/hello123.txt"
     open(&pathname[0], 102, 0)
-    print("whathathathat     !!!!!!!!!!!!!!")
+    print("whathathathat!!!!!!!!!!!!!!")
     return 0
 }
