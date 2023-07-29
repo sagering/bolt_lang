@@ -243,6 +243,7 @@ ParsedExpression = Union[ParsedUnaryOperation, ParsedBinaryOperation, ParsedPrim
 
 @dataclass
 class ParsedParameter:
+    is_comptime : bool
     name: ParsedName
     type: 'ParsedExpression'
     span: Span
@@ -890,10 +891,15 @@ def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError |
 
 
 def parse_parameter(token_source: TokenSource) -> [ParsedParameter, ParserError]:
-    (token_span, error) = token_source.try_consume_token(TokenKind.Name)
+    # @
+    token_span, error = token_source.try_consume_token(TokenKind.At)
+    is_comptime = not error
+    start = token_span.span.start if (token_span is not None) else None
+
+    token_span, error = token_source.try_consume_token(TokenKind.Name)
     if error: return None, error
 
-    start = token_span.span.start
+    start = start if start is not None else token_span.span.start
     par_name = ParsedName(token_span.token.data, token_span.span)
 
     _, error = token_source.try_consume_token(TokenKind.Colon)
@@ -902,7 +908,7 @@ def parse_parameter(token_source: TokenSource) -> [ParsedParameter, ParserError]
     parsed_type_expr, error = parse_expression(token_source)
     if error: return None, error
 
-    return ParsedParameter(par_name, parsed_type_expr, Span(start, token_source.idx())), None
+    return ParsedParameter(is_comptime, par_name, parsed_type_expr, Span(start, token_source.idx())), None
 
 
 def parse_extern_function_declaration(token_source: TokenSource) -> (ParsedExternFunctionDeclaration | None, ParserError | None):
@@ -926,7 +932,7 @@ def parse_extern_function_declaration(token_source: TokenSource) -> (ParsedExter
 
     # parameter list
     pars = []
-    while token_source.peek().token.kind == TokenKind.Name:
+    while token_source.peek().token.kind in [TokenKind.Name, TokenKind.At]:
         par, error = parse_parameter(token_source)
         if error: return None, error
 
@@ -974,7 +980,7 @@ def parse_function_definition(token_source: TokenSource) -> (ParsedFunctionDefin
 
     # parameter list
     pars = []
-    while token_source.peek().token.kind == TokenKind.Name:
+    while token_source.peek().token.kind in [TokenKind.Name, TokenKind.At]:
         par, error = parse_parameter(token_source)
         if error: return None, error
 

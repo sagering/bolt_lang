@@ -275,7 +275,6 @@ class Scope:
     variables: list[Variable] = field(default_factory=list)
     type_infos: dict[str, Struct] = field(default_factory=dict)
     type_variables: list[Variable] = field(default_factory=list)
-    full_types: list[CompleteType] = field(default_factory=list)
 
     scope_cnt: ClassVar[int] = 0
 
@@ -285,7 +284,6 @@ class Scope:
         self.children = []
         self.type_infos = {}
         self.type_variables = []
-        self.full_types = []
         self.comptime_functions = []
         self.parent = parent
         self.name = name
@@ -301,11 +299,31 @@ class Scope:
 
         return None
 
+    def check_type_exists(self, complete_type : CompleteType) -> bool:
+        current = complete_type
+        while current.is_array() or current.is_slice() or current.is_pointer():
+            current = current.next
+
+        assert(current.is_named_type())
+
+        named_type = current.named_type()
+        if named_type.name in builtin_types:
+            return True
+
+        node = self
+        while node:
+            # TODO: What about the order in which we should check either type_info or type_variable?
+            if named_type.name in node.type_infos:
+                return True
+            for var in reversed(node.variables):
+                if var.name == named_type.name:
+                    return var.type.is_type()
+            node = node.parent
+
+        return False
+
     def add_type_info(self, type_info : Struct):
         self.type_infos[type_info.name] = type_info
-
-    def add_full_type(self, full_type: CompleteType):
-        self.full_types.append(full_type)
 
     def get_scope_id(self) -> str:
         scope_id = self.name if self.name != '' else f'anonymous{self.scope_number}'
@@ -515,6 +533,7 @@ class ValidatedParameter:
     children: list['ValidatedNode']  # empty
     span: Span
     name: str
+    is_comptime : bool
 
     def type_expr(self) -> ValidatedExpression:
         return self.children[0]
@@ -1194,7 +1213,7 @@ ValidatedFunctionDefinitionPre | None, ValidationError | None):
         if error: return None, error
         if not validated_type_expr.type.is_type():
             return None, ValidationError(f"Expected type, got '{validated_type_expr}'", validated_type_expr.span)
-        validated_pars.append(ValidatedParameter([validated_type_expr], par.span, par.name.value))
+        validated_pars.append(ValidatedParameter([validated_type_expr], par.span, par.name.value, False))
 
     # check return type
     validated_return_type, error = validate_expression(scope, None, function_definition.return_type)
@@ -1216,13 +1235,30 @@ ValidatedFunctionDefinition | None, ValidationError | None):
 
     validated_pars: list[ValidatedParameter] = []
 
+    # add parameters
+    child_scope = scope.add_child_scope(validated_name.name)
+    child_scope.is_comptime = function_definition.is_comptime
+
+    comptime_par_cnt = 0
+
     # check parameter types
     for par in function_definition.pars:
         validated_type_expr, error = validate_expression(scope, None, par.type)
         if error: return None, error
         if not validated_type_expr.type.is_type():
             return None, ValidationError("Expected type", validated_type_expr.span)
-        validated_pars.append(ValidatedParameter([validated_type_expr], par.span, par.name.value))
+
+        if not child_scope.check_type_exists(validated_type_expr.value):
+            return None, ValidationError(f"Type {validated_type_expr.value.to_string()} does not exist.", validated_type_expr.span)
+
+        validated_pars.append(ValidatedParameter([validated_type_expr], par.span, par.name.value, par.is_comptime))
+        child_scope.add_var(validated_pars[-1])
+        if par.is_comptime:
+            comptime_par_cnt += 1
+
+    partial_comptime = comptime_par_cnt > 0 and comptime_par_cnt < len(validated_pars)
+    if function_definition.is_comptime or partial_comptime:
+        return ValidatedFunctionDefinition()
 
     # check return type
     validated_return_type_expr, error = validate_expression(scope, None, function_definition.return_type)
@@ -1230,13 +1266,6 @@ ValidatedFunctionDefinition | None, ValidationError | None):
 
     if not validated_return_type_expr.type.is_type():
         return None, ValidationError("Expected type", validated_return_type_expr.span)
-
-    # add parameters and
-    child_scope = scope.add_child_scope(validated_name.name)
-    child_scope.is_comptime = function_definition.is_comptime
-
-    for validated_par in validated_pars:
-        child_scope.add_var(validated_par)
 
     # TODO: add function to scope for recursive functions
 
@@ -1283,7 +1312,7 @@ ValidatedExternFunctionDeclaration | None, ValidationError | None):
         if error: return None, error
         if not validated_type_expr.type.is_type():
             return None, ValidationError("Expected type", validated_type_expr.span)
-        validated_pars.append(ValidatedParameter([validated_type_expr], par.span, par.name.value))
+        validated_pars.append(ValidatedParameter([validated_type_expr], par.span, par.name.value, False))
 
     # check return type
     validated_return_type, error = validate_expression(scope, None, extern_function_declaration.return_type)
