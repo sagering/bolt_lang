@@ -52,6 +52,7 @@ class TokenKind(Enum):
     String = 23
     LessThan = 24
     At = 25
+    And = 26
 
 
 @dataclass
@@ -182,7 +183,11 @@ def lex(input : str) -> tuple[list[TokenSpan] | None, str | None]:
             elif is_name_start_character(char):
                 token_span, error = lex_name(tindex)
                 if error: return None, error
-                tokens.append(token_span)
+
+                if token_span.token.data == 'and':
+                    tokens.append(TokenSpan(Token(TokenKind.And), token_span.span))
+                else:
+                    tokens.append(token_span)
             else:
                 raise NotImplementedError(f"Unhandled character {char}")
 

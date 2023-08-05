@@ -1,0 +1,11 @@
+@List(capacity : u32, T: type) : type {
+    return struct {
+        items : [capacity]T
+        size  : u32
+    }
+}
+
+main() : i32 {
+    p := List(10, i32) {}
+    return 0
+}

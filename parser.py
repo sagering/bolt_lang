@@ -89,21 +89,24 @@ class Operator(Enum):
     Equals = 5
     And = 6
     LessThan = 7
+    Address = 8
 
     def precedence(self) -> int:
         match self:
-            case Operator.LessThan:
-                return 4
-            case Operator.Equals:
-                return 5
-            case Operator.Plus:
-                return 10
-            case Operator.Minus:
+            case Operator.And:
                 return 20
-            case Operator.Multiply:
+            case Operator.Equals:
+                return 25
+            case Operator.LessThan:
                 return 30
-            case Operator.Divide:
+            case Operator.Plus:
+                return 35
+            case Operator.Minus:
                 return 40
+            case Operator.Multiply:
+                return 45
+            case Operator.Divide:
+                return 50
             case _:
                 raise NotImplementedError()
 
@@ -122,6 +125,8 @@ class Operator(Enum):
             case Operator.Equals:
                 return '=='
             case Operator.And:
+                return '&&'
+            case Operator.Address:
                 return '&'
             case _:
                 raise NotImplementedError()
@@ -311,6 +316,7 @@ class ParsedIfStatement:
     condition: ParsedExpression
     body: ParsedBlock
     span: Span
+    is_comptime : bool
 
 
 ParsedStatement = Union[
@@ -330,6 +336,9 @@ def parse_operator(token_source: TokenSource) -> (ParsedOperator | None, ParserE
     start = span.start
 
     match kind:
+        case TokenKind.And:
+            token_source.advance()
+            return ParsedOperator(Operator.And, Span(start, token_source.idx())), None
         case TokenKind.Plus:
             token_source.advance()
             return ParsedOperator(Operator.Plus, Span(start, token_source.idx())), None
@@ -350,7 +359,7 @@ def parse_operator(token_source: TokenSource) -> (ParsedOperator | None, ParserE
             return ParsedOperator(Operator.Equals, Span(start, token_source.idx())), None
         case TokenKind.Ampersand:
             token_source.advance()
-            return ParsedOperator(Operator.And, Span(start, token_source.idx())), None
+            return ParsedOperator(Operator.Address, Span(start, token_source.idx())), None
         case _:
             return None, ParserError(f"Failed to parse operator, unmatched token {kind}", span)
 
@@ -699,7 +708,7 @@ def parse_variable_declaration(token_source: TokenSource) -> (ParsedVariableDecl
     token_span, error = token_source.try_consume_token(TokenKind.Name)
     if error: return None, error
 
-    start: int = token_span.span.start
+    start = token_span.span.start
 
     name = token_span.token.data
 
@@ -766,18 +775,26 @@ def parse_break_stmt(token_source: TokenSource) -> tuple[Optional[ParsedBreakSta
 
 
 def parse_if_stmt(token_source: TokenSource) -> tuple[Optional[ParsedIfStatement], Optional[ParserError]]:
+
+    token_span, error = token_source.try_consume_token(TokenKind.At)
+    start = token_span.span.start if token_span else None
+
+    is_comptime = error is None
+
     token_span, error = token_source.try_consume_name("if")
     if error: return None, error
 
-    start = token_span.span.start
+    start = token_span.span.start if start is None else start
 
     expression, error = parse_expression(token_source)
     if error: return None, error
 
+    print('here')
     block, error = parse_block(token_source)
     if error: return None, error
+    print('not here')
 
-    return ParsedIfStatement(expression, block, Span(start, token_source.idx())), None
+    return ParsedIfStatement(expression, block, Span(start, token_source.idx()), is_comptime), None
 
 
 def parse_struct_field(token_source : TokenSource) -> (ParsedField | None, ParserError | None):
@@ -856,6 +873,11 @@ def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError |
             stmt, error = parse_variable_declaration(token_source)
             if error: return None, error
             stmts.append(stmt)
+        elif token_source.remaining() >= 3 and token_source.peek().token.kind == TokenKind.At and token_source.peek(1).token.kind == TokenKind.Name and token_source.peek(
+                2).token.kind == TokenKind.Colon:
+            stmt, error = parse_variable_declaration(token_source)
+            if error: return None, error
+            stmts.append(stmt)
         elif token_source.match_token(Token(TokenKind.Name, 'return')):
             stmt, error = parse_return_stmt(token_source)
             if error: return None, error
@@ -869,6 +891,10 @@ def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError |
             if error: return None, error
             stmts.append(stmt)
         elif token_source.match_token(Token(TokenKind.Name, 'if')):
+            stmt, error = parse_if_stmt(token_source)
+            if error: return None, error
+            stmts.append(stmt)
+        elif token_source.remaining() >= 2 and token_source.peek().token.kind == TokenKind.At and token_source.match_name('if', 1):
             stmt, error = parse_if_stmt(token_source)
             if error: return None, error
             stmts.append(stmt)
@@ -1017,10 +1043,17 @@ def parse_module(token_source: TokenSource) -> (ParsedModule | None, ParserError
             struct, error = parse_struct_expression(token_source)
             if error: return None, error
             body.append(struct)
+            token_source.skip(TokenKind.Newline)
         elif token_source.remaining() >= 2 and token_source.peek().token.kind == TokenKind.Name and token_source.peek(1).token.kind == TokenKind.Colon:
             variable_decl, error = parse_variable_declaration(token_source)
             if error: return None, error
             body.append(variable_decl)
+        elif token_source.remaining() >= 3 and token_source.peek().token.kind == TokenKind.At and token_source.peek(
+                1).token.kind == TokenKind.Name and token_source.peek(
+                2).token.kind == TokenKind.Colon:
+            stmt, error = parse_variable_declaration(token_source)
+            if error: return None, error
+            body.append(stmt)
         elif token.kind == TokenKind.Name and token.data == 'extern':
             extern_function_declaration, error = parse_extern_function_declaration(token_source)
             if error: return None, error

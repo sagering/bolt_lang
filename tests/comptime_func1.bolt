@@ -11,14 +11,6 @@
     }
 }
 
-@compute_at_comp_time() : i32 {
-    return 1
-}
-
-mixed(@T : type, a : T, b : T) : T {
-    return a + b
-}
-
 main() : i32 {
     p := List(10, i32) {}
     q := List(10, i32) {}

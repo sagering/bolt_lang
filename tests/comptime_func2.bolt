@@ -1,0 +1,11 @@
+
+mixed(@T : type, a : T, b : T) : T {
+    return a + b
+}
+
+main() : i32 {
+    mixed(i32, 1, 2)
+    mixed(i64, 1, 2)
+
+    return 0
+}

@@ -1,4 +1,5 @@
 import sys
+import traceback
 from collections import defaultdict
 from typing import Union, Optional, ClassVar, Callable
 from lexer import Span
@@ -12,24 +13,19 @@ from parser import ParsedModule, ParsedFunctionDefinition, ParsedExpression, Par
     TokenSource, ParsedAssignment, parse_module
 
 from lexer import lex
-import random
 
 builtin_types = ['i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'bool', 'f32', 'f64', 'void', 'type']
 
 
-@dataclass
-class FunctionReferenceValue:
-    function_definition : 'ValidatedFunctionDefinition'
-
-
-Value = Union[int, float, bool, str, 'Struct', 'CompleteType', FunctionReferenceValue]
+Value = Union[int, float, bool, str, 'Struct', 'CompleteType', 'ValidatedFunctionDefinition']
 
 
 @dataclass
 class Variable:
     name: str
     type: 'CompleteType'
-    value: Value = None
+    value : Optional[Value]
+    is_comptime : bool
 
 
 @dataclass
@@ -58,6 +54,7 @@ class FunctionPointer:
     pars: list['CompleteType']
     ret: 'CompleteType'
     is_comptime : bool
+    is_mixed : bool
 
 
 @dataclass
@@ -168,6 +165,8 @@ class CompleteType:
         else:
             raise NotImplementedError(self.get())
 
+    def __str__(self): return self.to_string()
+
     def collect_downstream_types(self, bag: dict[str, 'CompleteType']):
         if self.to_string() in bag:
             return
@@ -246,9 +245,13 @@ def is_unary_operator_defined(complete_type: CompleteType, op: Operator) -> (Com
 
 
 def is_binary_operator_defined(lhs: CompleteType, rhs: CompleteType, op: Operator) -> (CompleteType | None):
-    if not lhs.is_builtin() or lhs.named_type() == 'bool':
-        return None
-    else:
+    if lhs.is_bool() and rhs.is_bool() and op == Operator.And:
+        return CompleteType(NamedType('bool'))
+
+    if lhs.is_type() and rhs.is_type() and op == Operator.Equals:
+        return CompleteType(NamedType('bool'))
+
+    if lhs.is_number():
         match op:
             case Operator.Minus | Operator.Plus | Operator.Minus | Operator.Multiply | Operator.Divide:
                 return lhs
@@ -257,8 +260,7 @@ def is_binary_operator_defined(lhs: CompleteType, rhs: CompleteType, op: Operato
             case _:
                 return None
 
-
-scope_number: int = 0
+    return None
 
 
 @dataclass
@@ -270,25 +272,30 @@ class Scope:
     scope_number: int = 0
     is_comptime = False
 
-    functions: list[Function] = field(default_factory=list)
-    comptime_functions: list[FunctionReferenceValue] = field(default_factory=list)
-    variables: list[Variable] = field(default_factory=list)
+    functions: list['ValidatedFunctionDefinition'] = field(default_factory=list)
+    mixed_functions: list['ValidatedFunctionDefinition'] = field(default_factory=list)
+    mixed_function_instances: list['ValidatedFunctionDefinition'] = field(default_factory=list)
     type_infos: dict[str, Struct] = field(default_factory=dict)
-    type_variables: list[Variable] = field(default_factory=list)
 
     scope_cnt: ClassVar[int] = 0
 
     def __init__(self, name: str = '', parent: 'Scope' = None):
         self.functions = []
-        self.variables = []
+        self.vars = []
         self.children = []
         self.type_infos = {}
-        self.type_variables = []
-        self.comptime_functions = []
+        self.mixed_functions = []
+        self.mixed_function_instances = []
         self.parent = parent
         self.name = name
         self.scope_number = self.scope_cnt
         self.scope_cnt += 1
+
+    def get_root_scope(self) -> 'Scope':
+        scope = self
+        while scope.parent:
+            scope = scope.parent
+        return scope
 
     def get_type_info(self, name : str):
         if name in self.type_infos:
@@ -315,7 +322,7 @@ class Scope:
             # TODO: What about the order in which we should check either type_info or type_variable?
             if named_type.name in node.type_infos:
                 return True
-            for var in reversed(node.variables):
+            for var in reversed(node.vars):
                 if var.name == named_type.name:
                     return var.type.is_type()
             node = node.parent
@@ -332,9 +339,8 @@ class Scope:
         else:
             return scope_id
 
-    def add_var(self, what: Union['ValidatedVariableDeclarationStmt', 'ValidatedParameter']):
-        var = Variable(what.name, what.type_expr().value)
-        self.variables.append(var)
+    def add_var(self, var : Variable):
+        self.vars.append(var)
 
     def add_child_scope(self, name: str) -> 'Scope':
         scope = Scope(name=name)
@@ -342,14 +348,24 @@ class Scope:
         self.children.append(scope)
         return scope
 
-    def add_comptime_function(self, validated_function_def : 'ValidatedFunctionDefinition'):
-        self.comptime_functions.append(FunctionReferenceValue(validated_function_def))
+    def add_function(self, function):
+        self.functions.append(function)
 
-    def find_comptime_function(self, name):
-        for function in reversed(self.comptime_functions):
-            if function.function_definition.name().name == name:
+    def find_function(self, name):
+        for function in reversed(self.functions):
+            if function.name().name == name:
                 return function
-        if self.parent: return self.parent.find_comptime_function(name)
+        if self.parent: return self.parent.find_function(name)
+        return None
+
+    def add_mixed_function(self, f : 'ValidatedFunctionDefinitionPre'):
+        self.mixed_functions.append(f)
+
+    def find_mixed_function(self, name):
+        for function in reversed(self.mixed_functions):
+            if function.name().name == name:
+                return function
+        if self.parent: return self.parent.find_mixed_function(name)
         return None
 
     def get_child_scope(self, name: str) -> 'Scope':
@@ -358,25 +374,11 @@ class Scope:
                 return scope
         raise ValueError(f"Child scope '{name}' not found")
 
-    def find_function(self, name: str) -> Function | None:
-        for function in reversed(self.functions):
-            if function.name == name:
-                return function
-        if self.parent: return self.parent.find_function(name)
-        return None
-
     def find_var(self, name) -> Variable | None:
-        for var in reversed(self.variables):
+        for var in reversed(self.vars):
             if var.name == name:
                 return var
         if self.parent: return self.parent.find_var(name)
-        return None
-
-    def find_type_var(self, name) -> Variable | None:
-        for type_var in self.type_variables:
-            if type_var.name == name:
-                return type_var
-        if self.parent: self.parent.find_type_var(name)
         return None
 
 
@@ -442,6 +444,7 @@ class ValidatedCallExpr:
     span: Span
     type: CompleteType
     comptime : bool
+    refers_to : Optional[str] = None
 
     def expr(self) -> 'ValidatedExpression': return self.children[0]
 
@@ -548,31 +551,35 @@ class ValidatedBlock:
 
 
 @dataclass
-class ValidatedFunctionDefinitionPre:
-    children: list['ValidatedNode']
-    span: Span
-    is_comptime : bool
-
-    def name(self) -> ValidatedName: return self.children[0]
-
-    def return_type(self) -> ValidatedExpression: return self.children[1]
-
-    def pars(self) -> list['ValidatedParameter']: return self.children[2:]
-
-
-@dataclass
 class ValidatedFunctionDefinition:
     children: list['ValidatedNode']
     span: Span
+
+    parsed_function_definition : Optional[ParsedFunctionDefinition]
+
+    is_incomplete : bool
     is_comptime : bool
+    is_mixed : bool
+
+    mixed_instance_name : Optional[str]
 
     def name(self) -> ValidatedName: return self.children[0]
 
     def return_type(self) -> ValidatedExpression: return self.children[1]
 
-    def body(self) -> ValidatedBlock: return self.children[2]
+    def body(self) -> ValidatedBlock:
+        if self.is_incomplete:
+            raise LookupError('Function has now body yet')
+        return self.children[2]
 
-    def pars(self) -> list['ValidatedParameter']: return self.children[3:]
+    def pars(self) -> list['ValidatedParameter']:
+        if self.is_incomplete: return self.children[2:]
+        return self.children[3:]
+
+    def type(self) -> CompleteType:
+        par_types = [p.type_expr().value for p in self.pars()]
+        ret_type = self.return_type().value
+        return CompleteType(FunctionPointer(par_types, ret_type, self.is_comptime, self.is_mixed))
 
 
 @dataclass
@@ -767,7 +774,7 @@ ValidatedUnaryOperationExpr | None, ValidationError | None):
     else:
         op = parsed_unop.op.op
 
-        if op == Operator.And:
+        if op == Operator.Address:
             return ValidatedUnaryOperationExpr([val_expr], parsed_unop.span, parsed_unop.op.op,
                                                CompleteType(Pointer(), val_expr.type)), None
 
@@ -836,13 +843,43 @@ ValidatedCallExpr | None, ValidationError | None):
     if len(function_ptr.pars) != len(validated_args):
         return None, ValidationError(f'Wrong number of arguments in call to function', parsed_call.span)
 
-    for idx, (a, b) in enumerate(zip(function_ptr.pars, validated_args)):
-        if not a.eq_or_other_safely_convertible(b.type):
-            return None, ValidationError(
-                f'Type mismatch in {idx + 1}th argument in call to function, expected={a}, got={b.type}',
-                parsed_call.span)
+    if function_ptr.is_mixed:
+        mixed_function_name = validated_expr.name
+        mixed_function = scope.find_mixed_function(mixed_function_name)
+        child_scope = scope.add_child_scope('')
 
-    return ValidatedCallExpr([validated_expr, *validated_args], parsed_call.span, function_ptr.ret, function_ptr.is_comptime), None
+        name = ''
+        runtime_args = []
+
+        for par, arg in zip(mixed_function.pars(), validated_args):
+            if par.is_comptime:
+                par_name = par.name
+                par_type = evaluate_expr(par.type_expr(), scope)
+                par_value = evaluate_expr(arg, scope)
+                child_scope.add_var(Variable(par_name, par_type, par_value, True))
+                name += '__' + par_name + '_' + str(par_type) + '_' + str(par_value)
+            else:
+                runtime_args.append(arg)
+
+        name = mixed_function_name + '__' + str(hash(name) + sys.maxsize + 1)
+
+        validated_function_definition, error = validate_function_definition(child_scope, mixed_function.parsed_function_definition, True)
+        if error: return None, error
+
+        validated_function_definition.mixed_instance_name = name
+
+        root_scope = scope.get_root_scope()
+        root_scope.mixed_function_instances.append(validated_function_definition)
+
+        return ValidatedCallExpr([validated_expr, *runtime_args], parsed_call.span, validated_function_definition.return_type().value, False, name), None
+    else:
+        for idx, (a, b) in enumerate(zip(function_ptr.pars, validated_args)):
+            if not a.eq_or_other_safely_convertible(b.type):
+                return None, ValidationError(
+                    f'Type mismatch in {idx + 1}th argument in call to function, expected={a}, got={b.type}',
+                    parsed_call.span)
+
+        return ValidatedCallExpr([validated_expr, *validated_args], parsed_call.span, function_ptr.ret, function_ptr.is_comptime), None
 
 
 def validate_initializer_expression(scope: Scope, type_hint: CompleteType | None,
@@ -944,17 +981,25 @@ ValidatedNameExpr | None, ValidationError | None):
     if var := scope.find_var(parsed_name.value):
         return ValidatedNameExpr([], parsed_name.span, parsed_name.value, var.type), None
 
-    if type_var := scope.find_type_var(parsed_name.value):
-        return ValidatedNameExpr([], parsed_name.span, parsed_name.value, type_var.type), None
-
     if function := scope.find_function(parsed_name.value):
-        return ValidatedNameExpr([], parsed_name.span, parsed_name.value, function.type), None
+        return ValidatedNameExpr([], parsed_name.span, parsed_name.value, function.type()), None
+
+    if scope.check_type_exists(CompleteType(NamedType(parsed_name.value))):
+        return ValidatedNameExpr([], parsed_name.span, parsed_name.value, CompleteType(NamedType('type'))), None
 
     if parsed_name.value in ['true', 'false']:
         return ValidatedNameExpr([], parsed_name.span, parsed_name.value, CompleteType(NamedType('bool'))), None
 
-    # Assume that name refers to a type otherwise.
-    return ValidatedNameExpr([], parsed_name.span, parsed_name.value, CompleteType(NamedType('type'))), None
+    # s = scope
+    # all_names = []
+    # while s:
+    #     names = [f.name().name for f in s.functions]
+    #     all_names += names
+    #     s = s.parent
+    # assert(parsed_name.value not in all_names)
+    # traceback.print_stack()
+
+    return None, ValidationError(f"Unknown name '{parsed_name.value}'", parsed_name.span)
 
 
 def validate_primary_expr(scope, type_hint: CompleteType | None, expr: ParsedPrimaryExpression):
@@ -1049,7 +1094,7 @@ ValidatedArrayExpr | None, ValidationError | None):
                               CompleteType(Array(len(validated_exprs)), next=element_type)), None
 
 
-def validate_expression(scope: Scope, type_hint: CompleteType | None, expr: ParsedExpression) -> (
+def validate_expression(scope: Scope, type_hint: CompleteType | None, expr: ParsedExpression, force_evaluation=False) -> (
 ValidatedExpression | None, ValidationError | None):
 
     validated_expr = None
@@ -1064,10 +1109,12 @@ ValidatedExpression | None, ValidationError | None):
 
     if error: return None, error
 
-    assert(validated_expr is not None)
-
     if not scope.is_comptime and (isinstance(validated_expr, ValidatedCallExpr) and validated_expr.comptime or validated_expr.type.is_type()):
-        value = evaluate_expr(validated_expr, scope, Context())
+        value = evaluate_expr(validated_expr, scope)
+        validated_expr = ValidatedValueExpr([], validated_expr.span, value, validated_expr.type)
+
+    if force_evaluation:
+        value = evaluate_expr(validated_expr, scope)
         validated_expr = ValidatedValueExpr([], validated_expr.span, value, validated_expr.type)
 
     return validated_expr, None
@@ -1126,13 +1173,17 @@ def validate_break_stmt(scope: Scope, parsed_break: ParsedBreakStatement) -> tup
     return None, ValidationError('break statement not in while block', parsed_break.span)
 
 
-def validate_if_stmt(scope: Scope, parsed_if: ParsedIfStatement) -> tuple[
-    Optional[ValidatedIfStmt], Optional[ValidationError]]:
-    condition, error = validate_expression(scope, CompleteType(NamedType('bool')), parsed_if.condition)
+def validate_if_stmt(scope: Scope, parsed_if: ParsedIfStatement) -> (ValidatedIfStmt | None, ValidationError | None):
+
+    condition, error = validate_expression(scope, CompleteType(NamedType('bool')), parsed_if.condition, force_evaluation=parsed_if.is_comptime)
     if error: return None, error
 
     if not condition.type.is_bool():
         return None, ValidationError(f'expected boolean expression in while condition', parsed_if.condition.span)
+
+    if parsed_if.is_comptime:
+        if not condition.value:
+            return ValidatedIfStmt([condition, ValidatedBlock([], parsed_if.body.span)], parsed_if.span), None
 
     block, error = validate_block(scope, parsed_if.body)
     if error: return None, error
@@ -1142,14 +1193,14 @@ def validate_if_stmt(scope: Scope, parsed_if: ParsedIfStatement) -> tuple[
 
 def validate_assignment_stmt(scope: Scope, parsed_assignment: ParsedAssignment) -> tuple[Optional[ValidatedAssignmentStmt], Optional[ValidationError]]:
     var = scope.find_var(parsed_assignment.name.value)
-    if not var:
-        return None, ValidationError(f'expected valid variable', parsed_assignment.name.span)
+    if not var or var.is_comptime:
+        return None, ValidationError(f'expected valid runtime variable', parsed_assignment.name.span)
 
     value_expr, error = validate_expression(scope, None, parsed_assignment.value)
     if error: return None, error
 
     if not var.type.eq_or_other_safely_convertible(value_expr.type):
-        return None, ValidationError(f'incompatible types in assignment', parsed_assignment.span)
+        return None, ValidationError(f'incompatible types in assignment: {var.type.to_string()} and {value_expr.type.to_string()}', parsed_assignment.span)
 
     return ValidatedAssignmentStmt(
         [ValidatedNameExpr([], parsed_assignment.name.span, parsed_assignment.name.value, var.type), value_expr],
@@ -1172,7 +1223,7 @@ ValidatedBlock | None, ValidationError | None):
             validated_variable_decl, error = validate_variable_declaration(scope, stmt)
             if error: return None, error
             stmts.append(validated_variable_decl)
-            scope.add_var(validated_variable_decl)
+            scope.add_var(Variable(validated_variable_decl.name, validated_variable_decl.type_expr().value, None, False))
         elif isinstance(stmt, ParsedWhile):
             validated_while_stmt, error = validate_while_stmt(scope, stmt)
             if error: return None, error
@@ -1199,73 +1250,63 @@ ValidatedBlock | None, ValidationError | None):
     return ValidatedBlock(stmts, block.span), None
 
 
-def validate_function_definition_pre(scope: Scope,
-                                     function_definition: ParsedFunctionDefinition | ParsedExternFunctionDeclaration) -> (
-ValidatedFunctionDefinitionPre | None, ValidationError | None):
-    validated_name, error = validate_name(function_definition.name)
-    if error: return None, error
-
-    validated_pars: list[ValidatedParameter] = []
-
-    # check parameter types
-    for par in function_definition.pars:
-        validated_type_expr, error = validate_expression(scope, None, par.type)
-        if error: return None, error
-        if not validated_type_expr.type.is_type():
-            return None, ValidationError(f"Expected type, got '{validated_type_expr}'", validated_type_expr.span)
-        validated_pars.append(ValidatedParameter([validated_type_expr], par.span, par.name.value, False))
-
-    # check return type
-    validated_return_type, error = validate_expression(scope, None, function_definition.return_type)
-    if error: return None, error
-
-    is_comptime = isinstance(function_definition, ParsedFunctionDefinition) and function_definition.is_comptime
-
-    if not validated_return_type.type.is_type():
-        return None, ValidationError("Expected type", validated_return_type.span)
-
-    return ValidatedFunctionDefinitionPre(
-        [validated_name, validated_return_type, *validated_pars], function_definition.span, is_comptime), None
-
-
-def validate_function_definition(scope: Scope, function_definition: ParsedFunctionDefinition) -> (
+def validate_function_declaration(scope: Scope,
+                                     parsed_function_definition: ParsedFunctionDefinition | ParsedExternFunctionDeclaration, ignore_comptime_pars=False) -> (
 ValidatedFunctionDefinition | None, ValidationError | None):
-    validated_name, error = validate_name(function_definition.name)
+
+    validated_name, error = validate_name(parsed_function_definition.name)
     if error: return None, error
 
     validated_pars: list[ValidatedParameter] = []
 
-    # add parameters
     child_scope = scope.add_child_scope(validated_name.name)
-    child_scope.is_comptime = function_definition.is_comptime
-
     comptime_par_cnt = 0
 
     # check parameter types
-    for par in function_definition.pars:
-        validated_type_expr, error = validate_expression(scope, None, par.type)
+    for par in parsed_function_definition.pars:
+        if ignore_comptime_pars and par.is_comptime:
+            continue
+
+        validated_type_expr, error = validate_expression(child_scope, None, par.type)
         if error: return None, error
+
         if not validated_type_expr.type.is_type():
             return None, ValidationError("Expected type", validated_type_expr.span)
 
-        if not child_scope.check_type_exists(validated_type_expr.value):
-            return None, ValidationError(f"Type {validated_type_expr.value.to_string()} does not exist.", validated_type_expr.span)
-
         validated_pars.append(ValidatedParameter([validated_type_expr], par.span, par.name.value, par.is_comptime))
-        child_scope.add_var(validated_pars[-1])
+        child_scope.add_var(Variable(validated_pars[-1].name, validated_pars[-1].type_expr().value, None, par.is_comptime))
+
         if par.is_comptime:
             comptime_par_cnt += 1
 
-    partial_comptime = comptime_par_cnt > 0 and comptime_par_cnt < len(validated_pars)
-    if function_definition.is_comptime or partial_comptime:
-        return ValidatedFunctionDefinition()
-
     # check return type
-    validated_return_type_expr, error = validate_expression(scope, None, function_definition.return_type)
+    validated_return_type_expr, error = validate_expression(child_scope, None, parsed_function_definition.return_type)
     if error: return None, error
 
     if not validated_return_type_expr.type.is_type():
         return None, ValidationError("Expected type", validated_return_type_expr.span)
+
+    is_extern = isinstance(parsed_function_definition, ParsedExternFunctionDeclaration)
+    is_comptime = not is_extern and parsed_function_definition.is_comptime
+    is_mixed = comptime_par_cnt > 0 and comptime_par_cnt < len(validated_pars)
+
+    return ValidatedFunctionDefinition(
+        [validated_name, validated_return_type_expr, *validated_pars], parsed_function_definition.span, parsed_function_definition, True, is_comptime, is_mixed, None), None
+
+
+def validate_function_definition(scope: Scope, function_definition: ParsedFunctionDefinition, ignore_comptime_pars=False) -> (ValidatedFunctionDefinition | None, ValidationError | None):
+    validated_function_definition, error = validate_function_declaration(scope, function_definition, ignore_comptime_pars)
+    if error: return None, error
+
+    if validated_function_definition.is_mixed:
+        scope.add_mixed_function(validated_function_definition)
+        return validated_function_definition, None
+
+    child_scope = scope.add_child_scope(validated_function_definition.name().name)
+    child_scope.is_comptime = validated_function_definition.is_comptime
+
+    for par in validated_function_definition.pars():
+        child_scope.add_var(Variable(par.name, par.type_expr().value, None, False))
 
     # TODO: add function to scope for recursive functions
 
@@ -1282,8 +1323,8 @@ ValidatedFunctionDefinition | None, ValidationError | None):
     if not validated_return_stmt:
         return None, ValidationError(f'missing return in function {function_definition.name}', function_definition.span)
 
-    assert(isinstance(validated_return_type_expr, ValidatedValueExpr))
-    return_type = validated_return_type_expr.value
+    assert(isinstance(validated_function_definition.return_type(), ValidatedValueExpr)), validated_function_definition
+    return_type = validated_function_definition.return_type().value
 
     if not return_type.eq_or_other_safely_convertible(validated_return_stmt.expr().type):
         return None, ValidationError(
@@ -1291,10 +1332,12 @@ ValidatedFunctionDefinition | None, ValidationError | None):
             function_definition.span)
 
     ret = ValidatedFunctionDefinition(
-        [validated_name, validated_return_type_expr,
-         validated_block, *validated_pars], function_definition.span, function_definition.is_comptime)
+        [validated_function_definition.name(), validated_function_definition.return_type(),
+         validated_block, *validated_function_definition.pars()], function_definition.span, None, False, validated_function_definition.is_comptime, validated_function_definition.is_mixed, None)
 
-    scope.add_comptime_function(ret)
+    if ret.is_comptime:
+        scope.add_function(ret)
+
     return ret, None
 
 
@@ -1379,13 +1422,9 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
     # pre pass 2
     for stmt in module.body:
         if isinstance(stmt, ParsedFunctionDefinition) or isinstance(stmt, ParsedExternFunctionDeclaration):
-            validated_function_def_pre, error = validate_function_definition_pre(root_scope, stmt)
+            validated_function_def_pre, error = validate_function_declaration(root_scope, stmt)
             if error: return None, error
-            function_par_types = [par.type_expr().value for par in validated_function_def_pre.pars()]
-            return_type = validated_function_def_pre.return_type().value
-            function_type = CompleteType(
-            FunctionPointer(function_par_types, return_type, validated_function_def_pre.is_comptime))
-            root_scope.functions.append(Function(validated_function_def_pre.name().name, function_type))
+            root_scope.add_function(validated_function_def_pre)
 
     # main pass 1
     for stmt in module.body:
@@ -1408,7 +1447,7 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
             validated_variable_declaration, error = validate_variable_declaration(root_scope, stmt)
             if error: return None, error
             body.append(validated_variable_declaration)
-            root_scope.add_var(validated_variable_declaration)
+            root_scope.add_var(Variable(validated_variable_declaration.name, validated_variable_declaration.type_expr().value, None, False))
 
     # Determine order of structs and detect cycles.
     scopes = [root_scope]
@@ -1486,38 +1525,16 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
     return ValidatedModule(body, module.span, [struct_dict[struct_id] for struct_id in ordered], root_scope), None
 
 
-def visit_nodes(node: ValidatedNode, visitor: Callable[[ValidatedNode], None]):
-    visitor(node)
+def visit_nodes(node: ValidatedNode, visitor: Callable[[ValidatedNode], bool]):
+
+    if not visitor(node):
+        return
 
     for child in node.children:
         visit_nodes(child, visitor)
 
 
-class Context:
-    stack : list[Variable]
-    markers : list[int]
-
-    def __init__(self):
-        self.stack = []
-        self.markers = []
-
-    def stack_push(self):
-        self.markers.append(len(self.stack))
-
-    def stack_pop(self):
-        mark = self.markers.pop()
-
-        while len(self.stack) > mark:
-            self.stack.pop()
-
-    def resolve_stack_value(self, name : str) -> Variable | None:
-        for var in reversed(self.stack):
-            if var.name == name:
-                return var
-        return None
-
-
-def evaluate_block(block: ValidatedBlock, scope, context: Context) -> (int, Optional[Value]):
+def evaluate_block(block: ValidatedBlock, scope) -> (int, Optional[Value]):
     BLOCK_EXIT_STATUS_NONE = 0
     BLOCK_EXIT_STATUS_RETURN = 1
     BLOCK_EXIT_STATUS_BREAK = 2
@@ -1525,32 +1542,30 @@ def evaluate_block(block: ValidatedBlock, scope, context: Context) -> (int, Opti
     status = BLOCK_EXIT_STATUS_NONE
     val = None
 
-    context.stack_push()
-
     for stmt in block.children:
         if isinstance(stmt, ValidatedVariableDeclarationStmt):
-            type_value = evaluate_expr(stmt.type_expr(), scope, context)
-            init_value = evaluate_expr(stmt.initializer(), scope, context)
-            context.stack.append(Variable(stmt.name, type_value, init_value))
+            type_value = evaluate_expr(stmt.type_expr(), scope)
+            init_value = evaluate_expr(stmt.initializer(), scope)
+            scope.add_var(Variable(stmt.name, type_value, init_value))
         elif isinstance(stmt, ValidatedIfStmt):
-            cond = evaluate_expr(stmt.condition(), scope, context)
+            cond = evaluate_expr(stmt.condition(), scope)
             if cond:
-                status, val = evaluate_block(stmt.block(), scope, context)
+                status, val = evaluate_block(stmt.block(), scope)
                 if status != BLOCK_EXIT_STATUS_NONE:
                     break
         elif isinstance(stmt, ValidatedReturnStmt):
             status = BLOCK_EXIT_STATUS_RETURN
-            val = evaluate_expr(stmt.expr(), scope, context)
+            val = evaluate_expr(stmt.expr(), scope)
             break
         elif isinstance(stmt, ValidatedBreakStmt):
             status = BLOCK_EXIT_STATUS_BREAK
             break
         elif isinstance(stmt, ValidatedAssignmentStmt):
-            var = context.resolve_stack_value(stmt.name().name)
-            var.value = evaluate_expr(stmt.expr(), scope, context)
+            var = scope.find_var(stmt.name().name)
+            var.value = evaluate_expr(stmt.expr(), scope)
         elif isinstance(stmt, ValidatedWhileStmt):
-            while evaluate_expr(stmt.condition(), scope, context):
-                status, val = evaluate_block(stmt.block(), scope, context)
+            while evaluate_expr(stmt.condition(), scope):
+                status, val = evaluate_block(stmt.block(), scope)
                 if status == BLOCK_EXIT_STATUS_BREAK:
                     break
                 if status == BLOCK_EXIT_STATUS_RETURN:
@@ -1560,24 +1575,34 @@ def evaluate_block(block: ValidatedBlock, scope, context: Context) -> (int, Opti
         else:
             raise NotImplementedError(stmt)
 
-    context.stack_pop()
-
     return status, val
 
 
-def evaluate_expr(expr: ValidatedExpression, scope: Scope, context: Context) -> Value:
+def evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
+    assert (scope.parent != scope)
+
     if isinstance(expr, ValidatedValueExpr):
         return expr.value
 
     if isinstance(expr, ValidatedNameExpr):
-        var = context.resolve_stack_value(expr.name)
-        if var:
+        if expr.name == 'true':
+            return True
+
+        if expr.name == 'false':
+            return False
+
+        var = scope.find_var(expr.name)
+        if var and var.is_comptime:
             return var.value
 
         if expr.type.is_type():
             return CompleteType(NamedType(expr.name))
 
-        return scope.find_comptime_function(expr.name)
+        func = scope.find_function(expr.name)
+        if func and func.is_comptime:
+            return func
+
+        raise NotImplementedError()
 
     if isinstance(expr, ValidatedUnaryOperationExpr):
         if expr.type.is_type():
@@ -1586,56 +1611,55 @@ def evaluate_expr(expr: ValidatedExpression, scope: Scope, context: Context) -> 
                 raise NotImplementedError()
 
             if isinstance(expr.op, Operator) and expr.op == Operator.Multiply:
-                nested_type = evaluate_expr(expr.rhs(), scope, context)
+                nested_type = evaluate_expr(expr.rhs(), scope)
                 return CompleteType(Pointer(), nested_type)
 
             if isinstance(expr.op, ComplexOperator) and expr.op == ComplexOperator.Array:
-                array_length = evaluate_expr(expr.children[1], scope, context)
-                nested_type = evaluate_expr(expr.rhs(), scope, context)
+                array_length = evaluate_expr(expr.children[1], scope)
+                nested_type = evaluate_expr(expr.rhs(), scope)
                 return CompleteType(Array(array_length), nested_type)
 
             if isinstance(expr.op, ComplexOperator) and expr.op == ComplexOperator.Slice:
-                nested_type = evaluate_expr(expr.rhs(), scope, context)
+                nested_type = evaluate_expr(expr.rhs(), scope)
                 return CompleteType(Slice(), nested_type)
 
             raise NotImplementedError()
 
         elif isinstance(expr.op, Operator):
             if expr.op == Operator.Plus:
-                return evaluate_expr(expr, scope, context)
+                return evaluate_expr(expr, scope)
             if expr.op == Operator.Minus:
-                return -evaluate_expr(expr, scope, context)
+                return -evaluate_expr(expr, scope)
 
         raise NotImplementedError()
 
     if isinstance(expr, ValidatedBinaryOperationExpr):
         if expr.type.is_integer() or expr.type.is_floating_point() or expr.type.is_bool():
             if expr.op == Operator.Plus:
-                return evaluate_expr(expr.lhs(), scope, context) + evaluate_expr(expr.rhs(), scope, context)
+                return evaluate_expr(expr.lhs(), scope) + evaluate_expr(expr.rhs(), scope)
             if expr.op == Operator.Minus:
-                return evaluate_expr(expr.lhs(), scope, context) - evaluate_expr(expr.rhs(), scope, context)
+                return evaluate_expr(expr.lhs(), scope) - evaluate_expr(expr.rhs(), scope)
             if expr.op == Operator.Multiply:
-                return evaluate_expr(expr.lhs(), scope, context) * evaluate_expr(expr.rhs(), scope, context)
+                return evaluate_expr(expr.lhs(), scope) * evaluate_expr(expr.rhs(), scope)
             if expr.op == Operator.Divide:
-                return evaluate_expr(expr.lhs(), scope, context) / evaluate_expr(expr.rhs(), scope, context)
+                return evaluate_expr(expr.lhs(), scope) / evaluate_expr(expr.rhs(), scope)
             if expr.op == Operator.LessThan:
-                return evaluate_expr(expr.lhs(), scope, context) <= evaluate_expr(expr.rhs(), scope, context)
+                return evaluate_expr(expr.lhs(), scope) <= evaluate_expr(expr.rhs(), scope)
             if expr.op == Operator.Equals:
-                return evaluate_expr(expr.lhs(), scope, context) == evaluate_expr(expr.rhs(), scope, context)
+                return evaluate_expr(expr.lhs(), scope) == evaluate_expr(expr.rhs(), scope)
             if expr.op == Operator.And:
-                return evaluate_expr(expr.lhs(), scope, context) and evaluate_expr(expr.rhs(), scope, context)
+                return evaluate_expr(expr.lhs(), scope) and evaluate_expr(expr.rhs(), scope)
 
-        raise NotImplementedError()
+        raise NotImplementedError(expr)
 
     if isinstance(expr, ValidatedCallExpr):
-        function_reference : FunctionReferenceValue = evaluate_expr(expr.expr(), scope, context)
-        context.stack_push()
-        for par, arg in zip(function_reference.function_definition.pars(), expr.args()):
-            par_type_value = evaluate_expr(par.type_expr(), scope, context)
-            var = Variable(par.name, par_type_value, evaluate_expr(arg, scope, context))
-            context.stack.append(var)
-        _, return_value = evaluate_block(function_reference.function_definition.body(), scope, context)
-        context.stack_pop()
+        function_definition = evaluate_expr(expr.expr(), scope)
+        execution_scope = scope.get_root_scope().add_child_scope('call')
+        for par, arg in zip(function_definition.pars(), expr.args()):
+            par_type_value = evaluate_expr(par.type_expr(), scope)
+            var = Variable(par.name, par_type_value, evaluate_expr(arg, scope), True)
+            execution_scope.add_var(var)
+        _, return_value = evaluate_block(function_definition.body(), execution_scope)
         return return_value
 
     if isinstance(expr, ValidatedStructExpr):
@@ -1644,7 +1668,7 @@ def evaluate_expr(expr: ValidatedExpression, scope: Scope, context: Context) -> 
         signature = ''
 
         for field in expr.fields():
-            field_type = evaluate_expr(field.type_expr(), scope, context)
+            field_type = evaluate_expr(field.type_expr(), scope)
             fields.append(Struct.StructField(field.name().name, field_type))
             signature += f"{field.name().name}_{field_type.to_string()}__"
 

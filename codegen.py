@@ -241,6 +241,8 @@ def codegen_expr(expr: ValidatedExpression) -> str:
     elif isinstance(expr, ValidatedCallExpr):
         if expr.expr().name == 'len':
             return f'({codegen_expr(expr.args()[0])}.length)'
+        if expr.refers_to:
+            return f'({expr.refers_to}({",".join([codegen_expr(arg) for arg in expr.args()])}))'
         return f'({codegen_expr(expr.expr())}({",".join([codegen_expr(arg) for arg in expr.args()])}))'
     elif isinstance(expr, ValidatedDotExpr):
         deref = '*' if expr.auto_deref else ''
@@ -289,7 +291,8 @@ def codegen_expr(expr: ValidatedExpression) -> str:
 def codegen_function_definition(validated_function_definition : ValidatedFunctionDefinition, predeclaration : bool) -> str:
     out = ''
     pars = ','.join([f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in validated_function_definition.pars()])
-    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().value)} {validated_function_definition.name().name}({pars})'
+    name = validated_function_definition.name().name if validated_function_definition.mixed_instance_name is None else validated_function_definition.mixed_instance_name
+    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().value)} {name}({pars})'
 
     if predeclaration:
         out += ';\n'
@@ -353,10 +356,13 @@ def codegen_function_predeclarations(validated_module: ValidatedModule) -> str:
     out = '// FUNCTION PRE-DECLARATIONS\n'
     for stmt in validated_module.body():
         if isinstance(stmt, ValidatedFunctionDefinition):
-            if stmt.is_comptime: continue
+            if stmt.is_comptime or stmt.is_incomplete: continue
             out += codegen_function_definition(stmt, predeclaration=True)
         elif isinstance(stmt, ValidatedExternFunctionDeclaration):
             out += codegen_extern_function_declaration(stmt)
+
+    for stmt in validated_module.scope.mixed_function_instances:
+        out += codegen_function_definition(stmt, predeclaration=True)
 
     return out
 
@@ -365,7 +371,10 @@ def codegen_function_definitions(validated_module: ValidatedModule) -> str:
     out = '// FUNCTION DEFINITIONS\n'
     for stmt in validated_module.body():
         if isinstance(stmt, ValidatedFunctionDefinition):
+            if stmt.is_comptime or stmt.is_incomplete: continue
             out += codegen_stmt(stmt)
+    for stmt in validated_module.scope.mixed_function_instances:
+        out += codegen_function_definition(stmt, predeclaration=False)
     return out
 
 
@@ -373,13 +382,17 @@ def codegen_module(validated_module: ValidatedModule) -> str:
 
     type_dict = {}
 
-    # Collect all strings.
-    def collect_types(node : ValidatedNode) -> None:
+    def collect_types(node : ValidatedNode) -> bool:
+        if isinstance(node, ValidatedFunctionDefinition) and node.is_incomplete:
+            return False
+
         if isinstance(node, ValidatedValueExpr) and node.type.is_type():
             type = node.value
             while type:
                 type_dict[type.to_string()] = type
                 type = type.next
+
+        return True
 
     visit_nodes(validated_module, collect_types)
 
@@ -400,12 +413,14 @@ def codegen_module(validated_module: ValidatedModule) -> str:
                 type_dict[type.to_string()] = type
                 type = type.next
 
+
     # Collect all strings.
     def collect_string(node : ValidatedNode) -> None:
         if isinstance(node, ValidatedExpression) and expr_is_string(node):
             if node.value in string_table:
                 return
             string_table[node.value] = len(string_table)
+        return True
 
     visit_nodes(validated_module, collect_string)
 
