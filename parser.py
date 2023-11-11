@@ -285,10 +285,25 @@ class ParsedWhile:
 @dataclass
 class ParsedFunctionDefinition:
     name: ParsedName
+    is_comptime : bool
     pars: list[ParsedParameter]
     return_type: 'ParsedExpression'
     body: ParsedBlock
-    is_comptime : bool
+    span: Span
+
+    def runtime_par_count(self):
+        return len(list(filter(lambda par: not par.is_comptime, self.pars)))
+
+    def comptime_par_count(self):
+        return len(list(filter(lambda par: par.is_comptime, self.pars)))
+
+
+@dataclass
+class ParsedComptimeFunctionDefinition:
+    name: ParsedName
+    pars: list[ParsedParameter]
+    return_type: 'ParsedExpression'
+    body: ParsedBlock
     span: Span
 
 
@@ -789,10 +804,8 @@ def parse_if_stmt(token_source: TokenSource) -> tuple[Optional[ParsedIfStatement
     expression, error = parse_expression(token_source)
     if error: return None, error
 
-    print('here')
     block, error = parse_block(token_source)
     if error: return None, error
-    print('not here')
 
     return ParsedIfStatement(expression, block, Span(start, token_source.idx()), is_comptime), None
 
@@ -987,11 +1000,11 @@ def parse_extern_function_declaration(token_source: TokenSource) -> (ParsedExter
 
 def parse_function_definition(token_source: TokenSource) -> (ParsedFunctionDefinition | None, ParserError | None):
     # @
-    is_comptime = False
+    function_is_comptime = False
 
     token_span, error = token_source.try_consume_token(TokenKind.At)
     if not error:
-        is_comptime = True
+        function_is_comptime = True
 
     # name
     token_span, error = token_source.try_consume_token(TokenKind.Name)
@@ -1004,12 +1017,16 @@ def parse_function_definition(token_source: TokenSource) -> (ParsedFunctionDefin
     token_span, error = token_source.try_consume_token(TokenKind.LeftParen)
     if error: return None, error
 
+    is_comptime = function_is_comptime
+
     # parameter list
     pars = []
     while token_source.peek().token.kind in [TokenKind.Name, TokenKind.At]:
         par, error = parse_parameter(token_source)
         if error: return None, error
 
+        par.is_comptime |= function_is_comptime
+        is_comptime |= par.is_comptime
         pars.append(par)
 
         _, error = token_source.try_consume_token(TokenKind.Comma)
@@ -1031,7 +1048,7 @@ def parse_function_definition(token_source: TokenSource) -> (ParsedFunctionDefin
     block, error = parse_block(token_source)
     if error: return None, error
 
-    return ParsedFunctionDefinition(name, pars, parsed_type_expr, block, is_comptime, Span(start, token_source.idx())), None
+    return ParsedFunctionDefinition(name, function_is_comptime, pars, parsed_type_expr, block, Span(start, token_source.idx())), None
 
 
 def parse_module(token_source: TokenSource) -> (ParsedModule | None, ParserError | None):

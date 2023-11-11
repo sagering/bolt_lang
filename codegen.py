@@ -225,6 +225,7 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: d
 
     return out
 
+
 def expr_is_string(expr : ValidatedExpression):
     return isinstance(expr, ValidatedValueExpr) and expr.type.is_slice() and expr.type.next.is_named_type() and expr.type.next.named_type().name == 'u8'
 
@@ -239,11 +240,9 @@ def codegen_expr(expr: ValidatedExpression) -> str:
     elif isinstance(expr, ValidatedBinaryOperationExpr):
         return f'({codegen_expr(expr.lhs())}{expr.op.literal()}{codegen_expr(expr.rhs())})'
     elif isinstance(expr, ValidatedCallExpr):
-        if expr.expr().name == 'len':
+        if expr.name == 'len':
             return f'({codegen_expr(expr.args()[0])}.length)'
-        if expr.refers_to:
-            return f'({expr.refers_to}({",".join([codegen_expr(arg) for arg in expr.args()])}))'
-        return f'({codegen_expr(expr.expr())}({",".join([codegen_expr(arg) for arg in expr.args()])}))'
+        return f'({expr.name}({",".join([codegen_expr(arg) for arg in expr.args()[expr.comptime_arg_count:]])}))'
     elif isinstance(expr, ValidatedDotExpr):
         deref = '*' if expr.auto_deref else ''
         return f'(({deref}{codegen_expr(expr.expr())}).{expr.name().name})'
@@ -289,10 +288,9 @@ def codegen_expr(expr: ValidatedExpression) -> str:
 
 
 def codegen_function_definition(validated_function_definition : ValidatedFunctionDefinition, predeclaration : bool) -> str:
-    out = ''
-    pars = ','.join([f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in validated_function_definition.pars()])
-    name = validated_function_definition.name().name if validated_function_definition.mixed_instance_name is None else validated_function_definition.mixed_instance_name
-    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().value)} {name}({pars})'
+    out = 'extern "C" ' if validated_function_definition.is_extern else ''
+    pars = ','.join([f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in filter(lambda par: not par.is_comptime, validated_function_definition.pars())])
+    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().value)} {validated_function_definition.name().name}({pars})'
 
     if predeclaration:
         out += ';\n'
@@ -354,27 +352,22 @@ def codegen_variable_definitions(validated_module : ValidatedModule) -> str:
 
 def codegen_function_predeclarations(validated_module: ValidatedModule) -> str:
     out = '// FUNCTION PRE-DECLARATIONS\n'
-    for stmt in validated_module.body():
-        if isinstance(stmt, ValidatedFunctionDefinition):
-            if stmt.is_comptime or stmt.is_incomplete: continue
-            out += codegen_function_definition(stmt, predeclaration=True)
-        elif isinstance(stmt, ValidatedExternFunctionDeclaration):
-            out += codegen_extern_function_declaration(stmt)
 
-    for stmt in validated_module.scope.mixed_function_instances:
-        out += codegen_function_definition(stmt, predeclaration=True)
+    for function in validated_module.scope.functions:
+        if isinstance(function, ValidatedFunctionDefinition):
+            if function.is_incomplete and not function.is_extern or function.is_comptime: continue
+            out += codegen_function_definition(function, predeclaration=True)
 
     return out
 
 
 def codegen_function_definitions(validated_module: ValidatedModule) -> str:
     out = '// FUNCTION DEFINITIONS\n'
-    for stmt in validated_module.body():
-        if isinstance(stmt, ValidatedFunctionDefinition):
-            if stmt.is_comptime or stmt.is_incomplete: continue
-            out += codegen_stmt(stmt)
-    for stmt in validated_module.scope.mixed_function_instances:
-        out += codegen_function_definition(stmt, predeclaration=False)
+
+    for function in validated_module.scope.functions:
+        if function.is_incomplete or function.is_comptime: continue
+        out += codegen_function_definition(function, predeclaration=False)
+
     return out
 
 
