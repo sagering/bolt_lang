@@ -1,0 +1,60 @@
+
+comptime_assignment_var() : i32 {
+    @items := [1, 2, 3]
+    items = [42, 2, 3]
+    return items[0]
+}
+
+runtime_assignment_var() : i32 {
+    items := [1, 2, 3]
+    items = [42, 2, 3]
+    return items[0]
+}
+
+comptime_assignment_array_element() : i32 {
+    @items := [1, 2, 3]
+    items[0] = 42
+    return items[0]
+}
+
+runtime_assignment_array_element() : i32 {
+    items := [1, 2, 3]
+    items[0] = 42
+    return items[0]
+}
+
+@A := struct {
+    a : i32
+}
+
+comptime_assignment_struct_field() : i32 {
+    @a := A{}
+    a.a = 42
+    return a.a
+}
+
+runtime_assignment_struct_field() : i32 {
+    a := A{}
+    a.a = 42
+    return a.a
+}
+
+@B := struct {
+    a : [2]A
+}
+
+comptime_assignment_array_element_struct_field() : i32 {
+    @b := B{}
+    b.a[1].a = 42
+    return b.a[1].a
+}
+
+runtime_assignment_array_element_struct_field() : i32 {
+    b := B{}
+    b.a[1].a = 42
+    return b.a[1].a
+}
+
+main() : i32 {
+    return 0
+}

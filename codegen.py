@@ -117,6 +117,7 @@ def codegen_string_table() -> str:
         size += len(s.encode('utf-8')) + 1
 
     out = "// STRING TABLE\n"
+    if size == 0: return out
     out += f"u8 STRING_TABLE[{size}] = {{"
 
     offset = 0
@@ -317,7 +318,10 @@ def codegen_stmt(stmt: ValidatedStatement) -> str:
         if stmt.is_comptime: return ''
         out += codegen_function_definition(stmt, False)
     elif isinstance(stmt, ValidatedVariableDeclarationStmt):
-        out += f'{c_typename_with_ptrs(stmt.type_expr().value)} {stmt.name} = {codegen_expr(stmt.initializer())};\n'
+        if stmt.is_comptime:
+            pass
+        else:
+            out += f'{c_typename_with_ptrs(stmt.type_expr().value)} {stmt.name} = {codegen_expr(stmt.initializer())};\n'
     elif isinstance(stmt, ValidatedReturnStmt):
         out += f'return {codegen_expr(stmt.expr())};\n'
     elif isinstance(stmt, ValidatedBreakStmt):
@@ -333,7 +337,10 @@ def codegen_stmt(stmt: ValidatedStatement) -> str:
             out += codegen_stmt(substmt)
         out += '}\n'
     elif isinstance(stmt, ValidatedAssignmentStmt):
-        out += f'{codegen_expr(stmt.name())} = {codegen_expr(stmt.expr())};'
+        if stmt.is_comptime:
+            pass
+        else:
+            out += f'{codegen_expr(stmt.to())} = {codegen_expr(stmt.expr())};\n'
     elif isinstance(stmt, ValidatedExpression):
         out += codegen_expr(stmt) + ';\n'
     else:

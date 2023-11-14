@@ -262,15 +262,16 @@ class ParsedBlock:
 
 @dataclass
 class ParsedVariableDeclaration:
-    name: str
-    type: Optional['ParsedExpression']
-    initializer: ParsedExpression
     span: Span
+    type: Optional['ParsedExpression']
+    is_comptime : bool
+    name: str
+    initializer: ParsedExpression
 
 
 @dataclass
 class ParsedAssignment:
-    name: ParsedName
+    to: ParsedName
     value: ParsedExpression
     span: Span
 
@@ -720,6 +721,10 @@ def parse_return_stmt(token_source: TokenSource) -> (ParsedReturn | None, Parser
 
 
 def parse_variable_declaration(token_source: TokenSource) -> (ParsedVariableDeclaration | None, ParserError | None):
+    # @
+    token_span, error = token_source.try_consume_token(TokenKind.At)
+    is_comptime = not error
+
     token_span, error = token_source.try_consume_token(TokenKind.Name)
     if error: return None, error
 
@@ -741,7 +746,7 @@ def parse_variable_declaration(token_source: TokenSource) -> (ParsedVariableDecl
     _, error = token_source.try_consume_token(TokenKind.Newline)
     if error: return None, error
 
-    return ParsedVariableDeclaration(name, parsed_type_expr, expression, Span(start, token_source.idx())), None
+    return ParsedVariableDeclaration(Span(start, token_source.idx()), parsed_type_expr, is_comptime, name, expression), None
 
 
 def parse_while_stmt(token_source: TokenSource) -> (ParsedWhile | None, ParserError | None):
@@ -759,22 +764,19 @@ def parse_while_stmt(token_source: TokenSource) -> (ParsedWhile | None, ParserEr
     return ParsedWhile(expression, block, Span(start, token_source.idx())), None
 
 
-def parse_assignment_stmt(token_source: TokenSource) -> (ParsedAssignment | None, ParserError | None):
-    start = token_source.span().start
-
-    name, error = parse_name(token_source)
-    if error: return None, error
+def parse_assignment_stmt(token_source: TokenSource, parsed_expr : ParsedExpression) -> (ParsedAssignment | None, ParserError | None):
+    start = parsed_expr.span.start
 
     _, error = token_source.try_consume_token(TokenKind.Equals)
     if error: return None, error
 
-    expression, error = parse_expression(token_source)
+    value, error = parse_expression(token_source)
     if error: return None, error
 
     token_span, error = token_source.try_consume_token(TokenKind.Newline)
     if error: return None, error
 
-    return ParsedAssignment(name, expression, Span(start, token_source.idx())), None
+    return ParsedAssignment(parsed_expr, value, Span(start, token_source.idx())), None
 
 
 def parse_break_stmt(token_source: TokenSource) -> tuple[Optional[ParsedBreakStatement], Optional[ParserError]]:
@@ -911,17 +913,19 @@ def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError |
             stmt, error = parse_if_stmt(token_source)
             if error: return None, error
             stmts.append(stmt)
-        elif token_source.remaining() >= 2 and token_source.peek().token.kind == TokenKind.Name and token_source.peek(1).token.kind == TokenKind.Equals:
-            stmt, error = parse_assignment_stmt(token_source)
-            if error: return None, error
-            stmts.append(stmt)
         else:
-            stmt, error = parse_expression(token_source)
+            expr, error = parse_expression(token_source)
             if error: return None, error
-            _, error = token_source.try_consume_token(TokenKind.Newline)
-            if error: return None, error
-            stmt.span = Span(stmt.span.start, token_source.idx())
-            stmts.append(stmt)
+
+            if token_source.peek().token.kind == TokenKind.Equals:
+                stmt, error = parse_assignment_stmt(token_source, expr)
+                if error: return None, error
+                stmts.append(stmt)
+            else:
+                _, error = token_source.try_consume_token(TokenKind.Newline)
+                if error: return None, error
+                expr.span = Span(expr.span.start, token_source.idx())
+                stmts.append(expr)
 
     if len(stmts) == 0:
         return None, ParserError('Failed to parse block, expect at least one statement', token_source.span())

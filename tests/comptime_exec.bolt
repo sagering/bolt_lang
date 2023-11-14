@@ -1,0 +1,17 @@
+
+ABC := struct {
+    types : [2]i32
+}
+
+@List(capacity : i32, T: type) : type {
+    return struct {
+        items : [capacity]T
+        size : i32
+    }
+}
+
+main() : i32 {
+
+    list := List(64, ABC) {}
+    return 0
+}
