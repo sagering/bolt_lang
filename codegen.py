@@ -8,7 +8,7 @@ from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedRet
     ValidatedUnaryOperationExpr, ValidatedDotExpr, ValidatedIndexExpr, ValidatedInitializerExpr,\
     ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, \
     ValidatedArrayExpr,  ValidatedExternFunctionDeclaration, \
-    ValidatedSliceExpr, SliceBoundaryPlaceholder, ValidatedAssignmentStmt, Struct
+    ValidatedSliceExpr, SliceBoundaryPlaceholder, ValidatedAssignmentStmt, Struct, Value
 
 
 string_table : dict[str, int] = dict()
@@ -231,9 +231,30 @@ def expr_is_string(expr : ValidatedExpression):
     return isinstance(expr, ValidatedValueExpr) and expr.type.is_slice() and expr.type.next.is_named_type() and expr.type.next.named_type().name == 'u8'
 
 
+def codegen_value(value : Value) -> str:
+    if isinstance(value, float) or isinstance(value, int):
+        return f'{value}'
+    if isinstance(value, list):
+        return f'{{ .array = {{ {",".join(codegen_value(v) for v in value)} }} }}'
+    if isinstance(value, dict):
+        fields = ','.join([f".{k} = {codegen_value(v)}" for k, v in value.items()])
+        return f'{{ {fields} }}'
+    raise NotImplementedError(value)
+
 def codegen_expr(expr: ValidatedExpression) -> str:
-    if isinstance(expr, ValidatedValueExpr) and expr.type.is_number():
-        return f'({expr.value})'
+    if isinstance(expr, ValidatedValueExpr):
+        if expr.type.is_number():
+            return codegen_value(expr.value)
+        if expr.type.is_array():
+            return codegen_value(expr.value)
+        if expr.type.is_named_type() and not expr.type.is_builtin():
+            return codegen_value(expr.value)
+        if expr.type.is_slice() and expr.type.next.is_named_type() and expr.type.next.named_type().name == 'u8':
+            slice_type_name = c_typename_with_wrapped_pointers(expr.type)
+            offset = string_table[expr.value]
+            length = len(expr.value.encode('utf-8'))
+            return f'({slice_type_name}{{&STRING_TABLE[{offset}], {length}}})'
+        raise NotImplementedError(expr)
     elif isinstance(expr, ValidatedNameExpr):
         return f'{expr.name}'
     elif isinstance(expr, ValidatedUnaryOperationExpr):
@@ -256,11 +277,6 @@ def codegen_expr(expr: ValidatedExpression) -> str:
     elif isinstance(expr, ValidatedArrayExpr):
         array_type_name = c_typename_with_wrapped_pointers(expr.type)
         return f'({array_type_name}{{{{ {",".join(codegen_expr(expr) for expr in expr.children)} }}}})'
-    elif expr_is_string(expr):
-        slice_type_name = c_typename_with_wrapped_pointers(expr.type)
-        offset = string_table[expr.value]
-        length = len(expr.value.encode('utf-8'))
-        return f'({slice_type_name}{{&STRING_TABLE[{offset}], {length}}})'
     elif isinstance(expr, ValidatedSliceExpr):
         slice_type_name = c_typename_with_wrapped_pointers(expr.type)
 

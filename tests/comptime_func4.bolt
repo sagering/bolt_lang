@@ -1,0 +1,16 @@
+@A(T: type) : type {
+    return struct {
+        a : T
+    }
+}
+
+@B(T: type) : type {
+    return struct {
+        b : T
+    }
+}
+
+main() : i32 {
+    a := A(B(i32)) {}
+    return 0
+}

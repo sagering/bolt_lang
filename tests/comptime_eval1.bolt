@@ -1,0 +1,6 @@
+main() : i32 {
+    @a : i32 = 4
+    b  : i32 = 2
+    c  : i32 = a + b
+    return c
+}

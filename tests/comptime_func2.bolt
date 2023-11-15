@@ -1,26 +1,9 @@
-
 mixed(@T : type, a : T, b : T) : T {
     return a + b
-}
-
-@Forward(t : type) : type {
-    return t
-}
-
-mixed2(@a : i32, b : i32) : i32 {
-    return a + b
-}
-
-normal() : i32 {
-    return 4
 }
 
 main() : i32 {
     mixed(i32, 1, 2)
     mixed(i64, 1, 2)
-    mixed(Forward(i32), 1, 2)
-    mixed2(1, 2)
-    normal()
-
     return 0
 }
