@@ -298,6 +298,9 @@ class ParsedFunctionDefinition:
     def comptime_par_count(self):
         return len(list(filter(lambda par: par.is_comptime, self.pars)))
 
+    def any_par_count(self):
+        return len(list(filter(lambda par: isinstance(par.type, ParsedName) and par.type.value == 'any', self.pars)))
+
 
 @dataclass
 class ParsedComptimeFunctionDefinition:
@@ -477,7 +480,7 @@ def parse_operand(token_source: TokenSource) -> (ParsedExpression | None, Parser
             token_span, error = token_source.try_consume_token(TokenKind.RightParen)
             if error: return None, error
 
-            return expr_span, None
+            return parse_primary_expr(expr_span, token_source)
 
         case TokenKind.Plus:
             op, error = parse_operator(token_source)
@@ -933,7 +936,7 @@ def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError |
     return ParsedBlock(stmts, Span(start, token_source.idx())), None
 
 
-def parse_parameter(token_source: TokenSource) -> [ParsedParameter, ParserError]:
+def parse_parameter(token_source: TokenSource) -> (ParsedParameter | None, ParserError | None):
     # @
     token_span, error = token_source.try_consume_token(TokenKind.At)
     is_comptime = not error

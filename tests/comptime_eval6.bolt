@@ -1,0 +1,11 @@
+@ONE := 1
+
+other() : i32 {
+    @tmp := ONE
+    ONE = 2
+    return tmp
+}
+
+main() : i32 {
+    return ONE
+}

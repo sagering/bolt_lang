@@ -269,7 +269,7 @@ def codegen_expr(expr: ValidatedExpression) -> str:
         deref = '*' if expr.auto_deref else ''
         return f'(({deref}{codegen_expr(expr.expr())}).{expr.name().name})'
     elif isinstance(expr, ValidatedInitializerExpr):
-        return f'({c_typename_with_ptrs(expr.type)}' + '{})'
+        return f'(({c_typename_with_ptrs(expr.type)})' + '{})'
     elif isinstance(expr, ValidatedIndexExpr):
         if expr.expr().type.is_slice():
             return f'({codegen_expr(expr.expr())}.to[{codegen_expr(expr.index())}])'
@@ -348,10 +348,16 @@ def codegen_stmt(stmt: ValidatedStatement) -> str:
             out += codegen_stmt(substmt)
         out += '}\n'
     elif isinstance(stmt, ValidatedIfStmt):
-        out += f'if ({codegen_expr(stmt.condition())}) {{\n'
-        for substmt in stmt.block().statements():
-            out += codegen_stmt(substmt)
-        out += '}\n'
+        if stmt.is_comptime and not stmt.condition().value:
+            pass
+        elif stmt.is_comptime and stmt.condition().value:
+            for substmt in stmt.block().statements():
+                out += codegen_stmt(substmt)
+        else:
+            out += f'if ({codegen_expr(stmt.condition())}) {{\n'
+            for substmt in stmt.block().statements():
+                out += codegen_stmt(substmt)
+            out += '}\n'
     elif isinstance(stmt, ValidatedAssignmentStmt):
         if stmt.is_comptime:
             pass
@@ -412,6 +418,9 @@ def codegen_module(validated_module: ValidatedModule) -> str:
 
     visit_nodes(validated_module, collect_types)
 
+    for function in validated_module.scope.functions:
+        visit_nodes(function, collect_types)
+
     # Collect all structs from all scopes
     type_infos = {}
 
@@ -439,6 +448,9 @@ def codegen_module(validated_module: ValidatedModule) -> str:
         return True
 
     visit_nodes(validated_module, collect_string)
+
+    for function in validated_module.scope.functions:
+        visit_nodes(function, collect_string)
 
     out = ''
     out += codegen_prelude()

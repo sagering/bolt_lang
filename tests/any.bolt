@@ -1,0 +1,15 @@
+what(a : any) : any {
+    return "ye"
+}
+
+@A := struct {
+    a : i32
+}
+
+main() : i32 {
+    what(4)
+    what(1000)
+    what(1000000)
+    what(-131)
+    return 0
+}

@@ -662,6 +662,7 @@ class ValidatedBreakStmt:
 class ValidatedIfStmt:
     children: list['ValidatedNode']
     span: Span
+    is_comptime : bool
 
     def condition(self) -> ValidatedExpression: return self.children[0]
 
@@ -810,14 +811,14 @@ def validate_unop(scope: Scope, _: CompleteType | None, parsed_unop: ParsedUnary
 
         if op == Operator.Address:
             return ValidatedUnaryOperationExpr([val_expr], parsed_unop.span,
-                                               CompleteType(Pointer(), val_expr.type), val_expr.is_comptime,
+                                               CompleteType(Pointer(), val_expr.type), False,
                                                ExpressionMode.Value, parsed_unop.op.op, ), None
 
         if op == Operator.Multiply:
             if not val_expr.type.is_pointer():
                 return None, ValidationError(f'cannot dereference type {val_expr.type}', parsed_unop.span)
             return ValidatedUnaryOperationExpr([val_expr], parsed_unop.span, val_expr.type.next, val_expr.is_comptime,
-                                               ExpressionMode.Value, parsed_unop.op.op), None
+                                               ExpressionMode.Variable, parsed_unop.op.op), None
 
         if isinstance(val_expr, ValidatedValueExpr) and val_expr.type.is_number() and op == Operator.Minus:
             # The parser currently can only produce positive numbers. Negative numbers will be parsed as unary operation.
@@ -854,7 +855,7 @@ def validate_binop(scope: Scope, type_hint: CompleteType | None, parsed_binop: P
 
     if not (type_after_binop := is_binary_operator_defined(lhs.type, rhs.type, op)):
         return None, ValidationError(
-            f'type {lhs.type.get()} does no support binary operation with operator {op} and other type {rhs.type.get()}',
+            f'type {lhs.type} does no support binary operation with operator {op} and other type {rhs.type}',
             parsed_binop.span)
 
     return ValidatedBinaryOperationExpr([lhs, rhs], parsed_binop.span, type_after_binop,
@@ -1042,7 +1043,7 @@ def validate_name_expr(scope: Scope, type_hint: CompleteType | None, parsed_name
                                  parsed_name.value), None
 
     if parsed_name.value in ['true', 'false']:
-        return ValidatedNameExpr([], parsed_name.span, CompleteType(NamedType('bool')), False, ExpressionMode.Value,
+        return ValidatedNameExpr([], parsed_name.span, CompleteType(NamedType('bool')), True, ExpressionMode.Value,
                                  parsed_name.value), None
 
     # s = scope
@@ -1279,19 +1280,16 @@ def validate_break_stmt(scope: Scope, parsed_break: ParsedBreakStatement) -> tup
 
 def validate_if_stmt(scope: Scope, parsed_if: ParsedIfStatement) -> (ValidatedIfStmt | None, ValidationError | None):
     condition, error = validate_expression(scope, CompleteType(NamedType('bool')), parsed_if.condition,
-                                           is_comptime=parsed_if.is_comptime)
+                                               is_comptime=parsed_if.is_comptime)
     if error: return None, error
 
     if not condition.type.is_bool():
         return None, ValidationError(f'expected boolean expression in if condition', parsed_if.condition.span)
 
-    if condition.is_comptime:
-        return None, ValidationError(f'cannot branch on a comptime boolean', parsed_if.condition.span)
-
     block, error = validate_block(scope, parsed_if.body)
     if error: return None, error
 
-    return ValidatedIfStmt([condition, block], parsed_if.span), None
+    return ValidatedIfStmt([condition, block], parsed_if.span, parsed_if.is_comptime), None
 
 
 def validate_assignment_stmt(scope: Scope, parsed_assignment: ParsedAssignment) -> tuple[
@@ -1453,7 +1451,22 @@ def validate_function_definition(scope: Scope, parsed_function_definition: Parse
 
     # check parameter types
     for par in parsed_function_definition.pars:
-        validated_type_expr, error = validate_expression(child_scope, None, par.type, [], True, False)
+
+        any_par_type = isinstance(par.type, ParsedName) and par.type.value == 'any'
+        if any_par_type:
+            if len(bindings) > 0 and position < len(bindings):
+                parsed_expr = bindings[position]
+
+                validated_expr, error = validate_expression(child_scope, None, parsed_expr)
+                if error: return error
+
+                validated_type_expr = ValidatedValueExpr([], validated_expr.span, CompleteType(NamedType('type')), True, ExpressionMode.Value, validated_expr.type)
+                name += str(validated_expr.type)
+            else:
+                raise NotImplementedError()
+        else:
+            validated_type_expr, error = validate_expression(child_scope, None, par.type, [], True, False)
+
         if error: return None, error
 
         if not validated_type_expr.type.is_type():
@@ -1490,22 +1503,26 @@ def validate_function_definition(scope: Scope, parsed_function_definition: Parse
         if value:
             name += str(value)
 
-    if parsed_function_definition.comptime_par_count() > 0:
+    if parsed_function_definition.comptime_par_count() > 0 or parsed_function_definition.any_par_count() > 0:
         validated_name.name = validated_name.name + '__' + str(hash(name) + sys.maxsize + 1)
 
     # check return type
-    validated_return_type_expr, error = validate_expression(child_scope, None, parsed_function_definition.return_type,
-                                                            [], True, False)
-    if error: return None, error
+    any_return_type = isinstance(parsed_function_definition.return_type, ParsedName) and parsed_function_definition.return_type.value == 'any'
 
-    if not validated_return_type_expr.type.is_type():
-        return None, ValidationError("Expected type", validated_return_type_expr.span)
+    if not any_return_type:
+        validated_return_type_expr, error = validate_expression(child_scope, None, parsed_function_definition.return_type,
+                                                                [], True, False)
+        if error: return None, error
+
+        if not validated_return_type_expr.type.is_type():
+            return None, ValidationError("Expected type", validated_return_type_expr.span)
 
     validated_block, error = validate_block(child_scope, parsed_function_definition.body)
     if error: return None, error
 
     validated_return_stmt: Optional[ValidatedReturnStmt] = None
 
+    # FIXME: Check all branches for return statements
     for validated_stmt in validated_block.statements():
         if isinstance(validated_stmt, ValidatedReturnStmt):
             validated_return_stmt = validated_stmt
@@ -1515,10 +1532,15 @@ def validate_function_definition(scope: Scope, parsed_function_definition: Parse
         return None, ValidationError(f'missing return in function {parsed_function_definition.name}',
                                      parsed_function_definition.span)
 
-    if not validated_return_type_expr.value.eq_or_other_safely_convertible(validated_return_stmt.expr().type):
-        return None, ValidationError(
-            f'Return type mismatch in function "{parsed_function_definition.name.value}": declared return type is {validated_return_type_expr.value}, but returning expression of type {validated_return_stmt.expr().type}',
-            parsed_function_definition.span)
+    if not any_return_type:
+        if not validated_return_type_expr.value.eq_or_other_safely_convertible(validated_return_stmt.expr().type):
+            return None, ValidationError(
+                f'Return type mismatch in function "{parsed_function_definition.name.value}": declared return type is {validated_return_type_expr.value}, but returning expression of type {validated_return_stmt.expr().type}',
+                parsed_function_definition.span)
+    else:
+        # FIXME: Check all branches for return statements, check for conflicts
+        validated_return_type_expr = ValidatedValueExpr([], validated_return_stmt.expr().span, CompleteType(NamedType('type')), True,
+                                             ExpressionMode.Value, validated_return_stmt.expr().type)
 
     return ValidatedFunctionDefinition(
         [validated_name, validated_return_type_expr,
@@ -1582,7 +1604,7 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
     # pre pass 2
     for stmt in module.body:
         if isinstance(stmt, ParsedFunctionDefinition):
-            if stmt.is_comptime or stmt.comptime_par_count() > 0:
+            if stmt.is_comptime or stmt.comptime_par_count() > 0 or stmt.any_par_count() > 0:
                 root_scope.add_comptime_function_definition(stmt)
             else:
                 validated_function_def_pre, error = validate_function_declaration(root_scope, stmt)
@@ -1603,7 +1625,7 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
     # main pass 2
     for stmt in module.body:
         if isinstance(stmt, ParsedFunctionDefinition):
-            if not stmt.is_comptime and stmt.comptime_par_count() == 0:
+            if not stmt.is_comptime and stmt.comptime_par_count() == 0 and stmt.any_par_count() == 0:
                 validated_function_def, error = validate_function_definition(root_scope, stmt)
                 if error: return None, error
                 body.append(validated_function_def)

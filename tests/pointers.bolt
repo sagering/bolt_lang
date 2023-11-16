@@ -1,0 +1,12 @@
+test() : i32 {
+    ptr : *i32 = (*i32) {}
+    *ptr = 0
+    return 0
+}
+
+main() : i32 {
+    a := 4
+    b := &a
+    *b = 5
+    return *b
+}

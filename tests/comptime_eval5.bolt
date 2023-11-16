@@ -1,0 +1,11 @@
+@WINDOWS := 1
+@MACOS := 2
+
+@os := WINDOWS
+
+main() : i32 {
+    @if(os == WINDOWS) {
+        return 42
+    }
+    return 2
+}
