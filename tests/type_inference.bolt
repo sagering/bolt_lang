@@ -4,12 +4,17 @@ struct S {
     i0 : i32
 }
 
+@T := struct {
+    field : i32
+}
+
 main() : i32 {
     a := [12, 3, 4, 5]
     b := a[:]
     c := S{}
     d := 1
     e := .3
+    f := T{}
 
     return 0
 }

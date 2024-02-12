@@ -1,17 +1,18 @@
 from lexer import lex
 from parser import TokenSource, parse_module, print_parser_error
-from validator import validate_module
+from validator import validate_module, ArrayValue, StructValue, Array
 from collections import defaultdict
 from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedReturnStmt, \
     ValidatedVariableDeclarationStmt, ValidatedWhileStmt, ValidatedBreakStmt, ValidatedIfStmt, \
     ValidatedExpression, ValidatedNameExpr, ValidatedValueExpr, ValidatedCallExpr, ValidatedBinaryOperationExpr, \
-    ValidatedUnaryOperationExpr, ValidatedDotExpr, ValidatedIndexExpr, ValidatedInitializerExpr,\
+    ValidatedUnaryOperationExpr, ValidatedDotExpr, ValidatedIndexExpr, ValidatedInitializerExpr, \
     ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, \
-    ValidatedArrayExpr,  ValidatedExternFunctionDeclaration, \
+    ValidatedArrayExpr, ValidatedExternFunctionDeclaration, \
     ValidatedSliceExpr, SliceBoundaryPlaceholder, ValidatedAssignmentStmt, Struct, Value
 
+string_table: dict[str, int] = dict()
+data_table: list[int] = dict()
 
-string_table : dict[str, int] = dict()
 
 # TODO: It feels like this function is badly named, but I am not sure what to call it yet.
 def c_typename_with_wrapped_pointers(complete_type: CompleteType) -> str:
@@ -63,7 +64,7 @@ def c_typename_with_ptrs(type: CompleteType) -> str:
     return c_typename_with_wrapped_pointers(type) + pointers
 
 
-def decay(complete_type : CompleteType) -> CompleteType:
+def decay(complete_type: CompleteType) -> CompleteType:
     """Removes pointers and slices to expose the underlying type of complete type."""
     if complete_type.is_pointer() or complete_type.is_slice():
         return decay(complete_type.next)
@@ -85,7 +86,7 @@ def codegen_prelude() -> str:
     return out
 
 
-def codegen_slices(type_dict : dict[str, CompleteType]) -> str:
+def codegen_slices(type_dict: dict[str, CompleteType]) -> str:
     out = '// SLICES\n'
     for k, v in type_dict.items():
         if v.is_slice():
@@ -102,35 +103,12 @@ def codegen_slices(type_dict : dict[str, CompleteType]) -> str:
     return out
 
 
-def codegen_struct_predeclarations(type_dict : dict[str, CompleteType]) -> str:
+def codegen_struct_predeclarations(type_dict: dict[str, CompleteType]) -> str:
     out = '// STRUCT PRE-DECLARATIONS\n'
     for k, v in type_dict.items():
         if v.is_builtin() or v.is_function_ptr() or decay(v).is_builtin():
             continue
         out += f'struct {c_typename_with_wrapped_pointers(v)};\n'
-    return out
-
-
-def codegen_string_table() -> str:
-    size = 0
-    for s in string_table.keys():
-        size += len(s.encode('utf-8')) + 1
-
-    out = "// STRING TABLE\n"
-    if size == 0: return out
-    out += f"u8 STRING_TABLE[{size}] = {{"
-
-    offset = 0
-    for s in string_table.keys():
-        bytes = s.encode('utf-8')
-        if offset != 0:
-            out += ','
-        out += ','.join([str(b) for b in bytes])
-        out += ',0'
-        string_table[s] = offset
-        offset += len(bytes) + 1
-
-    out += "};\n"
     return out
 
 
@@ -146,7 +124,7 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: d
         if type.is_pointer() or type.is_slice():
             continue
 
-        if type.is_named_type() and not type.is_builtin():
+        if type.is_named_type() and not type.is_builtin() and not type.named_type().name == 'TypeInfo':
             struct = type_infos[type.named_type().name]
             for field in struct.fields:
 
@@ -186,13 +164,13 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: d
     # Dependency graph has cycles there are any edges left, i.e. if any of node's out edge list is not empty.
     # This is not supposed to happen because the types should have been checked already in the validate step.
     for type_id, edges in out_edges.items():
-        assert(len(edges) == 0)
+        assert (len(edges) == 0)
 
     out = '// STRUCT DEFINITIONS\n'
     for key in ordered:
         type = type_dict[key]
 
-        if type.is_builtin() or type.is_function_ptr():
+        if type.is_builtin() or type.is_function_ptr() or type.is_named_type() and type.named_type().name == 'TypeInfo':
             continue
 
         if type.is_named_type():
@@ -227,11 +205,16 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: d
     return out
 
 
-def expr_is_string(expr : ValidatedExpression):
-    return isinstance(expr, ValidatedValueExpr) and expr.type.is_slice() and expr.type.next.is_named_type() and expr.type.next.named_type().name == 'u8'
+def expr_is_string(expr: ValidatedExpression):
+    return isinstance(expr,
+                      ValidatedValueExpr) and expr.type.is_slice() and expr.type.next.is_named_type() and expr.type.next.named_type().name == 'u8'
 
 
-def codegen_value(value : Value) -> str:
+def expr_is_slice(expr: ValidatedExpression):
+    return isinstance(expr, ValidatedValueExpr) and expr.type.is_slice()
+
+
+def codegen_value(value: Value) -> str:
     if isinstance(value, float) or isinstance(value, int):
         return f'{value}'
     if isinstance(value, list):
@@ -239,7 +222,10 @@ def codegen_value(value : Value) -> str:
     if isinstance(value, dict):
         fields = ','.join([f".{k} = {codegen_value(v)}" for k, v in value.items()])
         return f'{{ {fields} }}'
+    if isinstance(value, str):
+        return f'"{value}"'
     raise NotImplementedError(value)
+
 
 def codegen_expr(expr: ValidatedExpression) -> str:
     if isinstance(expr, ValidatedValueExpr):
@@ -249,11 +235,12 @@ def codegen_expr(expr: ValidatedExpression) -> str:
             return codegen_value(expr.value)
         if expr.type.is_named_type() and not expr.type.is_builtin():
             return codegen_value(expr.value)
-        if expr.type.is_slice() and expr.type.next.is_named_type() and expr.type.next.named_type().name == 'u8':
+        if expr.type.is_slice() and expr.escapes:
             slice_type_name = c_typename_with_wrapped_pointers(expr.type)
-            offset = string_table[expr.value]
-            length = len(expr.value.encode('utf-8'))
-            return f'({slice_type_name}{{&STRING_TABLE[{offset}], {length}}})'
+            sliced_type_name = c_typename_with_wrapped_pointers(expr.type.next)
+            offset = expr.value.byte_offset
+            length = expr.value.end - expr.value.start
+            return f'({slice_type_name}{{&__BUFFER[{offset} + {expr.value.start} * sizeof({sliced_type_name})], {length}}})'
         raise NotImplementedError(expr)
     elif isinstance(expr, ValidatedNameExpr):
         return f'{expr.name}'
@@ -287,26 +274,28 @@ def codegen_expr(expr: ValidatedExpression) -> str:
             slice_start = codegen_expr(expr.start())
 
         if isinstance(expr.end(), SliceBoundaryPlaceholder):
-            if expr.expr().type.is_array():
-                slice_end = f'{expr.expr().type.array().length}'
+            if expr.src().type.is_array():
+                slice_end = f'{expr.src().type.array().length}'
             else:
-                slice_end = '(' + codegen_expr(expr.expr()) + '.length)'
+                slice_end = '(' + codegen_expr(expr.src()) + '.length)'
 
         else:
             slice_end = codegen_expr(expr.end())
 
-        if expr.expr().type.is_array():
-            return f'({slice_type_name}{{(&{codegen_expr(expr.expr())}.array[0]) + {slice_start}, ({slice_end} - {slice_start})}})'
+        if expr.src().type.is_array():
+            return f'({slice_type_name}{{(&{codegen_expr(expr.src())}.array[0]) + {slice_start}, ({slice_end} - {slice_start})}})'
 
-        return f'({slice_type_name}{{{codegen_expr(expr.expr())}.to + {slice_start}, ({slice_end} - {slice_start})}})'
+        return f'({slice_type_name}{{{codegen_expr(expr.src())}.to + {slice_start}, ({slice_end} - {slice_start})}})'
 
     else:
         raise NotImplementedError(expr)
 
 
-def codegen_function_definition(validated_function_definition : ValidatedFunctionDefinition, predeclaration : bool) -> str:
+def codegen_function_definition(validated_function_definition: ValidatedFunctionDefinition,
+                                predeclaration: bool) -> str:
     out = 'extern "C" ' if validated_function_definition.is_extern else ''
-    pars = ','.join([f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in filter(lambda par: not par.is_comptime, validated_function_definition.pars())])
+    pars = ','.join([f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in
+                     filter(lambda par: not par.is_comptime, validated_function_definition.pars())])
     out += f'{c_typename_with_ptrs(validated_function_definition.return_type().value)} {validated_function_definition.name().name}({pars})'
 
     if predeclaration:
@@ -320,9 +309,10 @@ def codegen_function_definition(validated_function_definition : ValidatedFunctio
     return out
 
 
-def codegen_extern_function_declaration(validated_extern_function_decl : ValidatedExternFunctionDeclaration) -> str:
+def codegen_extern_function_declaration(validated_extern_function_decl: ValidatedExternFunctionDeclaration) -> str:
     out = 'extern "C" '
-    pars = ','.join([f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in validated_extern_function_decl.pars()])
+    pars = ','.join(
+        [f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in validated_extern_function_decl.pars()])
     out += f'{c_typename_with_ptrs(validated_extern_function_decl.return_type().value)} {validated_extern_function_decl.name().name} ({pars})'
     out += ';\n'
     return out
@@ -371,7 +361,7 @@ def codegen_stmt(stmt: ValidatedStatement) -> str:
     return out
 
 
-def codegen_variable_definitions(validated_module : ValidatedModule) -> str:
+def codegen_variable_definitions(validated_module: ValidatedModule) -> str:
     out = '// VARIABLE DEFINITIONS\n'
     for stmt in validated_module.body():
         if isinstance(stmt, ValidatedVariableDeclarationStmt):
@@ -401,10 +391,9 @@ def codegen_function_definitions(validated_module: ValidatedModule) -> str:
 
 
 def codegen_module(validated_module: ValidatedModule) -> str:
-
     type_dict = {}
 
-    def collect_types(node : ValidatedNode) -> bool:
+    def collect_types(node: ValidatedNode) -> bool:
         if isinstance(node, ValidatedFunctionDefinition) and node.is_incomplete:
             return False
 
@@ -438,31 +427,64 @@ def codegen_module(validated_module: ValidatedModule) -> str:
                 type_dict[type.to_string()] = type
                 type = type.next
 
+    buffer = []
+    id_to_buffer_byte_offset = dict()
 
-    # Collect all strings.
-    def collect_string(node : ValidatedNode) -> None:
-        if isinstance(node, ValidatedExpression) and expr_is_string(node):
-            if node.value in string_table:
-                return
-            string_table[node.value] = len(string_table)
+    def dump_rec(val: Value, type: CompleteType):
+        byte_offset = len(buffer)
+
+        if type.is_array():
+            if id(val) in id_to_buffer_byte_offset:
+                return id_to_buffer_byte_offset[id(val)]
+            assert (isinstance(val, list))
+            assert (type.next is not None)
+            for element in val:
+                dump_rec(element, type.next)
+
+            id_to_buffer_byte_offset[id(val)] = byte_offset
+        elif type.is_u8():
+            assert (isinstance(val, int))
+            buffer.append(val)
+        elif type.is_struct():
+            assert (isinstance(val, dict))
+            ti : Struct = type_infos[type.named_type().name]
+            for field in ti.fields:
+                assert(field.name in val)
+                dump_rec(val[field.name], field.type)
+        else:
+            raise NotImplementedError()
+
+        return byte_offset
+
+    def collect_data(node: ValidatedNode) -> bool:
+        if isinstance(node, ValidatedValueExpr) and node.escapes and node.type.is_slice():
+            node.value.byte_offset = dump_rec(node.value.ptr, CompleteType(Array(len(node.value.ptr)), node.type.next))
+
         return True
 
-    visit_nodes(validated_module, collect_string)
+    visit_nodes(validated_module, collect_data)
 
     for function in validated_module.scope.functions:
-        visit_nodes(function, collect_string)
+        visit_nodes(function, collect_data)
 
     out = ''
     out += codegen_prelude()
     out += codegen_struct_predeclarations(type_dict)
     out += codegen_slices(type_dict)
-    out += codegen_string_table()
+    out += codegen_buffer(buffer)
     out += codegen_struct_definitions(type_dict, type_infos)
     out += codegen_variable_definitions(validated_module)
     out += codegen_function_predeclarations(validated_module)
     out += codegen_function_definitions(validated_module)
 
     return out
+
+
+def codegen_buffer(buffer: list[int]) -> str:
+    if len(buffer) == 0:
+        return ''
+    values = ','.join([f'{str(byte)}' for byte in buffer])
+    return f"u8 __BUFFER[{len(buffer)}] = {{{values}}};\n"
 
 
 def main():

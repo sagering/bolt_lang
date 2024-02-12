@@ -1,0 +1,33 @@
+
+
+print(str : []u8) : i32 {
+    return 0
+}
+
+print_field_names(@T : type, val : T) : i32 {
+    @ti := typeinfo(T)
+
+    i := 0
+
+    while i < 2 {
+        name := ti.fields[i].name
+        print(name)
+        i = i + 1
+    }
+
+    return 0
+}
+
+main() : i32 {
+
+    @A := struct {
+        field1 : i32
+        field2 : i64
+    }
+
+    a := A{}
+
+    print_field_names(A, a)
+
+    return 0
+}

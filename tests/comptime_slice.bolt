@@ -1,0 +1,37 @@
+
+a() : []u8 {
+    @t := "this language is very innovative"
+    return t[10:15]
+}
+
+b() : []u8 {
+    @t := [1, 2, 3, 4]
+    return t[1:]
+}
+
+c() : []u8 {
+    @t := "this language is very innovative"
+    return t[10:15][1:2]
+}
+
+struct MyStruct {
+    field : u8
+    name : []u8
+}
+
+d() : []MyStruct {
+    @first := MyStruct{}
+    @second := MyStruct{}
+    first.name = "abcdefg"
+    second.name = "hijklmn"
+    @array := [ first, second ]
+    return array[:]
+}
+
+main() : i32 {
+    a()
+    b()
+    c()
+    d()
+    return 0
+}
