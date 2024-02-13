@@ -1,10 +1,10 @@
 from lexer import lex
 from parser import TokenSource, parse_module, print_parser_error
-from validator import validate_module, ArrayValue, StructValue, Array
+from validator import validate_module, ArrayValue, StructValue, Array, ValidatedExpressionStmt
 from collections import defaultdict
 from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedReturnStmt, \
     ValidatedVariableDeclarationStmt, ValidatedWhileStmt, ValidatedBreakStmt, ValidatedIfStmt, \
-    ValidatedExpression, ValidatedNameExpr, ValidatedValueExpr, ValidatedCallExpr, ValidatedBinaryOperationExpr, \
+    ValidatedExpression, ValidatedNameExpr, ValidatedComptimeValueExpr, ValidatedCallExpr, ValidatedBinaryOperationExpr, \
     ValidatedUnaryOperationExpr, ValidatedDotExpr, ValidatedIndexExpr, ValidatedInitializerExpr, \
     ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, \
     ValidatedArrayExpr, ValidatedExternFunctionDeclaration, \
@@ -207,14 +207,17 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: d
 
 def expr_is_string(expr: ValidatedExpression):
     return isinstance(expr,
-                      ValidatedValueExpr) and expr.type.is_slice() and expr.type.next.is_named_type() and expr.type.next.named_type().name == 'u8'
+                      ValidatedComptimeValueExpr) and expr.type.is_slice() and expr.type.next.is_named_type() and expr.type.next.named_type().name == 'u8'
 
 
 def expr_is_slice(expr: ValidatedExpression):
-    return isinstance(expr, ValidatedValueExpr) and expr.type.is_slice()
+    return isinstance(expr, ValidatedComptimeValueExpr) and expr.type.is_slice()
 
 
 def codegen_value(value: Value) -> str:
+    # bool check before int check, because bool is sublcass of int in python
+    if isinstance(value, bool):
+        return f'{"1" if value else "0"}'
     if isinstance(value, float) or isinstance(value, int):
         return f'{value}'
     if isinstance(value, list):
@@ -222,20 +225,16 @@ def codegen_value(value: Value) -> str:
     if isinstance(value, dict):
         fields = ','.join([f".{k} = {codegen_value(v)}" for k, v in value.items()])
         return f'{{ {fields} }}'
-    if isinstance(value, str):
-        return f'"{value}"'
     raise NotImplementedError(value)
 
 
 def codegen_expr(expr: ValidatedExpression) -> str:
-    if isinstance(expr, ValidatedValueExpr):
-        if expr.type.is_number():
-            return codegen_value(expr.value)
+    if isinstance(expr, ValidatedComptimeValueExpr):
         if expr.type.is_array():
             return codegen_value(expr.value)
-        if expr.type.is_named_type() and not expr.type.is_builtin():
+        if expr.type.is_named_type():
             return codegen_value(expr.value)
-        if expr.type.is_slice() and expr.escapes:
+        if expr.type.is_slice():
             slice_type_name = c_typename_with_wrapped_pointers(expr.type)
             sliced_type_name = c_typename_with_wrapped_pointers(expr.type.next)
             offset = expr.value.byte_offset
@@ -353,8 +352,8 @@ def codegen_stmt(stmt: ValidatedStatement) -> str:
             pass
         else:
             out += f'{codegen_expr(stmt.to())} = {codegen_expr(stmt.expr())};\n'
-    elif isinstance(stmt, ValidatedExpression):
-        out += codegen_expr(stmt) + ';\n'
+    elif isinstance(stmt, ValidatedExpressionStmt):
+        out += codegen_expr(stmt.expr()) + ';\n'
     else:
         raise NotImplementedError(stmt)
 
@@ -397,7 +396,7 @@ def codegen_module(validated_module: ValidatedModule) -> str:
         if isinstance(node, ValidatedFunctionDefinition) and node.is_incomplete:
             return False
 
-        if isinstance(node, ValidatedValueExpr) and node.type.is_type():
+        if isinstance(node, ValidatedComptimeValueExpr) and node.type.is_type():
             type = node.value
             while type:
                 type_dict[type.to_string()] = type
@@ -451,13 +450,15 @@ def codegen_module(validated_module: ValidatedModule) -> str:
             for field in ti.fields:
                 assert(field.name in val)
                 dump_rec(val[field.name], field.type)
+        elif type.is_slice():
+            val.byte_offset = dump_rec(val.ptr, CompleteType(Array(len(val.ptr)), type.next))
         else:
             raise NotImplementedError()
 
         return byte_offset
 
     def collect_data(node: ValidatedNode) -> bool:
-        if isinstance(node, ValidatedValueExpr) and node.escapes and node.type.is_slice():
+        if isinstance(node, ValidatedComptimeValueExpr) and node.type.is_slice():
             node.value.byte_offset = dump_rec(node.value.ptr, CompleteType(Array(len(node.value.ptr)), node.type.next))
 
         if isinstance(node, ValidatedStatement) and node.is_comptime:

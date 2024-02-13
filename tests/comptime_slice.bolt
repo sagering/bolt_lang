@@ -1,12 +1,14 @@
 
-struct MyStruct {
-    field : u8
-    name : []u8
+@MyStruct() : type {
+    return struct {
+        field : u8
+        name : []u8
+    }
 }
 
-d() : []MyStruct {
-    @first := MyStruct{}
-    @second := MyStruct{}
+d() : []MyStruct() {
+    @first := MyStruct(){}
+    @second := MyStruct(){}
     first.name = "abcdefg"
     second.name = "hijklmn"
     @array := [ first, second ]
