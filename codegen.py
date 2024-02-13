@@ -460,6 +460,9 @@ def codegen_module(validated_module: ValidatedModule) -> str:
         if isinstance(node, ValidatedValueExpr) and node.escapes and node.type.is_slice():
             node.value.byte_offset = dump_rec(node.value.ptr, CompleteType(Array(len(node.value.ptr)), node.type.next))
 
+        if isinstance(node, ValidatedStatement) and node.is_comptime:
+            return False
+
         return True
 
     visit_nodes(validated_module, collect_data)
