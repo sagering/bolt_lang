@@ -15,7 +15,24 @@ d() : []MyStruct() {
     return array[:]
 }
 
+extern write(fd : i32, buffer : *u8, count : u64) : u64
+
+println(str : []u8, len : i32) : i32 {
+    write(1, &str[0], 5)
+
+    nl : [1]u8 = [10]
+    write(1, &nl[0], 1)
+    return 0
+}
+
 main() : i32 {
-    d()
+    myslice := d()
+    println(myslice[0].name, 0)
+    println(myslice[1].name, 0)
+
+    ti := typeinfo(MyStruct())
+
+    println(ti.fields[0].name, 0)
+
     return 0
 }

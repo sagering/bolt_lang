@@ -506,9 +506,7 @@ class ValidatedTypeInfoCallExpr:
     is_comptime: bool
     mode: ExpressionMode
 
-    def expr(self) -> 'ValidatedExpression': return self.children[0]
-
-    def args(self) -> list['ValidatedExpression']: return self.children[1:]
+    def args(self) -> list['ValidatedExpression']: return self.children
 
 
 @dataclass
@@ -831,12 +829,16 @@ def validate_number(type_hint: CompleteType | None, parsed_number: ParsedNumber)
             return None, ValidationError(f'integer number {parsed_number.value} too large', parsed_number.span)
 
 
+def str_to_slicevalue(s : str) -> SliceValue:
+    assert(isinstance(s, str))
+    bytes = s.encode('utf-8')
+    return SliceValue(0, len(bytes), list(bytes))
+
+
 def validate_string(type_hint: CompleteType | None, parsed_str: ParsedString) -> (
         ValidatedComptimeValueExpr | None, ValidationError | None):
-    bytes = parsed_str.value.encode('utf-8')
-    slice_value = SliceValue(0, len(bytes), list(bytes))
     return ValidatedComptimeValueExpr([], parsed_str.span, CompleteType(Slice(), CompleteType(NamedType('u8'))), True,
-                                      ExpressionMode.Value, slice_value), None
+                                      ExpressionMode.Value, str_to_slicevalue(parsed_str.value)), None
 
 
 def validate_unop(scope: Scope, _: CompleteType | None, force_evaluation: bool, parsed_unop: ParsedUnaryOperation) -> (
@@ -925,7 +927,7 @@ def validate_binop(scope: Scope, type_hint: CompleteType | None, force_evaluatio
 
 
 def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: ParsedCall) -> (
-        ValidatedCallExpr | None, ValidationError | None):
+        ValidatedCallExpr | ValidatedTypeInfoCallExpr | None, ValidationError | None):
     if isinstance(parsed_call.expr, ParsedName) and parsed_call.expr.value == 'typeinfo':
         if len(parsed_call.args) != 1:
             return None, ValidationError(
@@ -935,7 +937,7 @@ def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: Par
         if error: return None, error
 
         # FIXME: name expr?
-        return ValidatedTypeInfoCallExpr([None, validated_arg], parsed_call.span, CompleteType(NamedType('TypeInfo')),
+        return ValidatedTypeInfoCallExpr([validated_arg], parsed_call.span, CompleteType(NamedType('TypeInfo')),
                                          True, mode=ExpressionMode.Value), None
 
     # Assumption: validated_expr will be a ValidatedNameExpr
@@ -1380,6 +1382,9 @@ def validate_variable_declaration(scope: Scope, parsed_variable_decl: ParsedVari
     # without type expression
     else:
         init_expr, error = validate_expression(scope, None, False, parsed_variable_decl.initializer)
+        if error: return None, error
+
+        init_expr, error = try_evaluate_expression_recursively(scope, init_expr)
         if error: return None, error
 
         # FIXME: types are compile time only expressions. Maybe adding a field to expression to indicate comptime_only
@@ -2010,7 +2015,8 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
     if isinstance(expr, ValidatedTypeInfoCallExpr):
         value = do_evaluate_expr(expr.args()[0], scope)
         struct = scope.get_type_info(value.named_type().name)
-        return {"name": struct.name, "fields": list(map(lambda field: {"name": field.name}, struct.fields))}
+        fields = list(map(lambda field: {"name": str_to_slicevalue(field.name)}, struct.fields))
+        return {"name": str_to_slicevalue(struct.name), "fields": SliceValue(0, len(fields), fields)}
 
     if isinstance(expr, ValidatedStructExpr):
         fields = []

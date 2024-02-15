@@ -1,6 +1,6 @@
 from lexer import lex
 from parser import TokenSource, parse_module, print_parser_error
-from validator import validate_module, ArrayValue, StructValue, Array, ValidatedExpressionStmt
+from validator import validate_module, ArrayValue, StructValue, Array, ValidatedExpressionStmt, SliceValue, NamedType
 from collections import defaultdict
 from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedReturnStmt, \
     ValidatedVariableDeclarationStmt, ValidatedWhileStmt, ValidatedBreakStmt, ValidatedIfStmt, \
@@ -170,7 +170,7 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: d
     for key in ordered:
         type = type_dict[key]
 
-        if type.is_builtin() or type.is_function_ptr() or type.is_named_type() and type.named_type().name == 'TypeInfo':
+        if type.is_builtin() or type.is_function_ptr():
             continue
 
         if type.is_named_type():
@@ -214,32 +214,35 @@ def expr_is_slice(expr: ValidatedExpression):
     return isinstance(expr, ValidatedComptimeValueExpr) and expr.type.is_slice()
 
 
-def codegen_value(value: Value) -> str:
+def codegen_value(value: Value, type: CompleteType) -> str:
     # bool check before int check, because bool is sublcass of int in python
     if isinstance(value, bool):
         return f'{"1" if value else "0"}'
     if isinstance(value, float) or isinstance(value, int):
         return f'{value}'
     if isinstance(value, list):
-        return f'{{ .array = {{ {",".join(codegen_value(v) for v in value)} }} }}'
+        return f'{{ .array = {{ {",".join(codegen_value(v, type.next) for v in value)} }} }}'
     if isinstance(value, dict):
-        fields = ','.join([f".{k} = {codegen_value(v)}" for k, v in value.items()])
+        ti = type_infos[type.named_type().name]
+        fields = ','.join([f".{field.name} = {codegen_value(value[field.name], field.type)}" for field in ti.fields])
         return f'{{ {fields} }}'
+    if isinstance(value, SliceValue):
+        slice_type_name = c_typename_with_wrapped_pointers(type)
+        length = value.end - value.start
+        return f'({slice_type_name}{{&{value.ref}[{value.start}], {length}}})'
     raise NotImplementedError(value)
 
 
 def codegen_expr(expr: ValidatedExpression) -> str:
     if isinstance(expr, ValidatedComptimeValueExpr):
         if expr.type.is_array():
-            return codegen_value(expr.value)
+            return codegen_value(expr.value, expr.type)
         if expr.type.is_named_type():
-            return codegen_value(expr.value)
+            return codegen_value(expr.value, expr.type)
         if expr.type.is_slice():
             slice_type_name = c_typename_with_wrapped_pointers(expr.type)
-            sliced_type_name = c_typename_with_wrapped_pointers(expr.type.next)
-            offset = expr.value.byte_offset
             length = expr.value.end - expr.value.start
-            return f'({slice_type_name}{{&__BUFFER[{offset} + {expr.value.start} * sizeof({sliced_type_name})], {length}}})'
+            return f'({slice_type_name}{{&{expr.value.ref}[{expr.value.start}], {length}}})'
         raise NotImplementedError(expr)
     elif isinstance(expr, ValidatedNameExpr):
         return f'{expr.name}'
@@ -389,6 +392,9 @@ def codegen_function_definitions(validated_module: ValidatedModule) -> str:
     return out
 
 
+type_infos = {}
+
+
 def codegen_module(validated_module: ValidatedModule) -> str:
     type_dict = {}
 
@@ -410,7 +416,6 @@ def codegen_module(validated_module: ValidatedModule) -> str:
         visit_nodes(function, collect_types)
 
     # Collect all structs from all scopes
-    type_infos = {}
 
     scopes = [validated_module.scope]
     while len(scopes) > 0:
@@ -420,46 +425,85 @@ def codegen_module(validated_module: ValidatedModule) -> str:
             scopes.append(child)
 
     for type_info in type_infos.values():
+
+        type_dict[type_info.name] = CompleteType(NamedType(type_info.name))
+
         for field in type_info.fields:
             type = field.type
             while type:
                 type_dict[type.to_string()] = type
                 type = type.next
 
-    buffer = []
     id_to_buffer_byte_offset = dict()
 
-    def dump_rec(val: Value, type: CompleteType):
-        byte_offset = len(buffer)
+    cnt = 0
+    init_code = ""
 
-        if type.is_array():
-            if id(val) in id_to_buffer_byte_offset:
-                return id_to_buffer_byte_offset[id(val)]
-            assert (isinstance(val, list))
-            assert (type.next is not None)
-            for element in val:
-                dump_rec(element, type.next)
+    def init_rec(val: Value, type : CompleteType):
+        out = ""
 
-            id_to_buffer_byte_offset[id(val)] = byte_offset
+        if type.is_struct():
+            name = type.named_type().name
+            ti = type_infos[name]
+            fields = ", ".join([f".{field.name} = {init_rec(val[field.name], field.type)}" for field in ti.fields])
+            out += f'{c_typename_with_ptrs(type)} {{ {fields} }}'
+        if type.is_u8():
+            out += f'{val}'
+        if type.is_slice():
+            slice_type_name = c_typename_with_wrapped_pointers(type)
+            length = val.end - val.start
+            val.ref = init(val.ptr, CompleteType(Array(len(val.ptr)), type.next))
+            out += f'({slice_type_name}{{&{val.ref}[{val.start}], {length}}})'
+
+        return out
+
+    def init(val: Value, type : CompleteType):
+        nonlocal init_code
+        nonlocal cnt
+
+        if type.is_struct():
+            init_val_code = init_rec(val, type)
+            name = f'__{cnt}'
+            init_code += f'struct {name} = {init_val_code};\n'
         elif type.is_u8():
-            assert (isinstance(val, int))
-            buffer.append(val)
-        elif type.is_struct():
-            assert (isinstance(val, dict))
-            ti : Struct = type_infos[type.named_type().name]
-            for field in ti.fields:
-                assert(field.name in val)
-                dump_rec(val[field.name], field.type)
-        elif type.is_slice():
-            val.byte_offset = dump_rec(val.ptr, CompleteType(Array(len(val.ptr)), type.next))
+            init_val_code = init_rec(val, type)
+            name = f'__{cnt}'
+            init_code += f'u8 {name} = {init_val_code};\n'
+        elif type.is_array():
+            element_c_type = c_typename_with_wrapped_pointers(type.next)
+            init_val_code =  ", ".join([init_rec(element, type.next) for element in val])
+            name = f'__{cnt}'
+            init_code += f'{element_c_type} {name}[{len(val)}] = {{ {init_val_code} }};\n'
         else:
             raise NotImplementedError()
 
-        return byte_offset
+        cnt += 1
+
+        return name
+
+    def collect_slicevalues(value : Value, type: CompleteType):
+
+        result = []
+
+        def collect_slicevalues_rec(value: Value, type: CompleteType):
+
+            if type.is_slice():
+                result.append((value, type))
+
+            if type.is_struct():
+                name = type.named_type().name
+                ti = type_infos[name]
+
+                for field in ti.fields:
+                    collect_slicevalues_rec(value[field.name], field.type)
+
+        collect_slicevalues_rec(value, type)
+        return result
 
     def collect_data(node: ValidatedNode) -> bool:
-        if isinstance(node, ValidatedComptimeValueExpr) and node.type.is_slice():
-            node.value.byte_offset = dump_rec(node.value.ptr, CompleteType(Array(len(node.value.ptr)), node.type.next))
+        if isinstance(node, ValidatedComptimeValueExpr):
+            for slicevalue, type in collect_slicevalues(node.value, node.type):
+                slicevalue.ref = init(slicevalue.ptr, CompleteType(Array(len(slicevalue.ptr)), type.next))
 
         if isinstance(node, ValidatedStatement) and node.is_comptime:
             return False
@@ -475,8 +519,8 @@ def codegen_module(validated_module: ValidatedModule) -> str:
     out += codegen_prelude()
     out += codegen_struct_predeclarations(type_dict)
     out += codegen_slices(type_dict)
-    out += codegen_buffer(buffer)
     out += codegen_struct_definitions(type_dict, type_infos)
+    out += init_code
     out += codegen_variable_definitions(validated_module)
     out += codegen_function_predeclarations(validated_module)
     out += codegen_function_definitions(validated_module)
