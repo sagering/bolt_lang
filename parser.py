@@ -90,6 +90,7 @@ class Operator(Enum):
     And = 6
     LessThan = 7
     Address = 8
+    SetUnion = 8
 
     def precedence(self) -> int:
         match self:
@@ -99,6 +100,8 @@ class Operator(Enum):
                 return 25
             case Operator.LessThan:
                 return 30
+            case Operator.SetUnion:
+                return 31
             case Operator.Plus:
                 return 35
             case Operator.Minus:
@@ -281,6 +284,7 @@ class ParsedWhile:
     condition: ParsedExpression
     block: ParsedBlock
     span: Span
+    is_comptime : bool
 
 
 @dataclass
@@ -373,6 +377,9 @@ def parse_operator(token_source: TokenSource) -> (ParsedOperator | None, ParserE
         case TokenKind.LessThan:
             token_source.advance(1)
             return ParsedOperator(Operator.LessThan, Span(start, token_source.idx())), None
+        case TokenKind.Pipe:
+            token_source.advance(1)
+            return ParsedOperator(Operator.SetUnion, Span(start, token_source.idx())), None
         case TokenKind.Equals if token_source.match_token(Token(TokenKind.Equals), 1):
             token_source.advance(2)
             return ParsedOperator(Operator.Equals, Span(start, token_source.idx())), None
@@ -753,18 +760,27 @@ def parse_variable_declaration(token_source: TokenSource) -> (ParsedVariableDecl
 
 
 def parse_while_stmt(token_source: TokenSource) -> (ParsedWhile | None, ParserError | None):
+    # @
+    token_span, error = token_source.try_consume_token(TokenKind.At)
+    start = token_span.span.start if token_span else None
+
+    is_comptime = error is None
+
+    # while
     token_span, error = token_source.try_consume_name("while")
     if error: return None, error
 
-    start = token_span.span.start
+    start = token_span.span.start if start is None else start
 
+    # condition
     expression, error = parse_expression(token_source)
     if error: return None, error
 
+    # block
     block, error = parse_block(token_source)
     if error: return None, error
 
-    return ParsedWhile(expression, block, Span(start, token_source.idx())), None
+    return ParsedWhile(expression, block, Span(start, token_source.idx()), is_comptime), None
 
 
 def parse_assignment_stmt(token_source: TokenSource, parsed_expr : ParsedExpression) -> (ParsedAssignment | None, ParserError | None):
@@ -901,6 +917,10 @@ def parse_block(token_source: TokenSource) -> (ParsedBlock | None, ParserError |
             if error: return None, error
             stmts.append(stmt)
         elif token_source.match_token(Token(TokenKind.Name, 'while')):
+            stmt, error = parse_while_stmt(token_source)
+            if error: return None, error
+            stmts.append(stmt)
+        elif token_source.remaining() >= 2 and token_source.peek().token.kind == TokenKind.At and token_source.match_name('while', 1):
             stmt, error = parse_while_stmt(token_source)
             if error: return None, error
             stmts.append(stmt)

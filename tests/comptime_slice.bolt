@@ -1,38 +1,45 @@
-
 @MyStruct() : type {
     return struct {
-        field : u8
-        name : []u8
+        field1 : u8
+        field2 : []u8
+        field3 : i32
     }
-}
-
-d() : []MyStruct() {
-    @first := MyStruct(){}
-    @second := MyStruct(){}
-    first.name = "abcdefg"
-    second.name = "hijklmn"
-    @array := [ first, second ]
-    return array[:]
 }
 
 extern write(fd : i32, buffer : *u8, count : u64) : u64
 
-println(str : []u8, len : i32) : i32 {
-    write(1, &str[0], 5)
+println(str : []u8) : i32 {
+    write(1, &str[0], len(str))
 
     nl : [1]u8 = [10]
     write(1, &nl[0], 1)
     return 0
 }
 
+print_field_names(@t : type) : i32 {
+    ti := typeinfo(t)
+
+    i := 0
+    while i < len(ti.fields) {
+        println(ti.fields[i].name)
+        i = i + 1
+    }
+
+    return 0
+}
+
+escape_comptime_slice() : []MyStruct() {
+    first := MyStruct() {}
+    first.field2 = "first"
+    second := MyStruct() {}
+    second.field2 = "second"
+    array := [first, second]
+    return array[:]
+}
+
 main() : i32 {
-    myslice := d()
-    println(myslice[0].name, 0)
-    println(myslice[1].name, 0)
-
-    ti := typeinfo(MyStruct())
-
-    println(ti.fields[0].name, 0)
+    escape_comptime_slice()
+    print_field_names(MyStruct())
 
     return 0
 }

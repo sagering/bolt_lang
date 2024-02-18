@@ -1,0 +1,14 @@
+
+@ints : typeset = i8 | i32 | i64 | u8 | u32 | u64
+
+addOne(@T : ints, val : T) : T {
+    return val + 1
+}
+
+main() : i32 {
+    val1 : i32 = 1
+    val2 : i64 = 1
+    addOne(val1)
+    addOne(val2)
+    return 0
+}

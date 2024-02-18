@@ -1,6 +1,7 @@
 from lexer import lex
 from parser import TokenSource, parse_module, print_parser_error
-from validator import validate_module, ArrayValue, StructValue, Array, ValidatedExpressionStmt, SliceValue, NamedType
+from validator import validate_module, ArrayValue, StructValue, Array, ValidatedExpressionStmt, SliceValue, NamedType, \
+    ValidatedLenCallExpr, ValidatedBlock
 from collections import defaultdict
 from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedReturnStmt, \
     ValidatedVariableDeclarationStmt, ValidatedWhileStmt, ValidatedBreakStmt, ValidatedIfStmt, \
@@ -251,8 +252,6 @@ def codegen_expr(expr: ValidatedExpression) -> str:
     elif isinstance(expr, ValidatedBinaryOperationExpr):
         return f'({codegen_expr(expr.lhs())}{expr.op.literal()}{codegen_expr(expr.rhs())})'
     elif isinstance(expr, ValidatedCallExpr):
-        if expr.name == 'len':
-            return f'({codegen_expr(expr.args()[0])}.length)'
         return f'({expr.name}({",".join([codegen_expr(arg) for arg in expr.args()[expr.comptime_arg_count:]])}))'
     elif isinstance(expr, ValidatedDotExpr):
         deref = '*' if expr.auto_deref else ''
@@ -266,6 +265,9 @@ def codegen_expr(expr: ValidatedExpression) -> str:
     elif isinstance(expr, ValidatedArrayExpr):
         array_type_name = c_typename_with_wrapped_pointers(expr.type)
         return f'({array_type_name}{{{{ {",".join(codegen_expr(expr) for expr in expr.children)} }}}})'
+    elif isinstance(expr, ValidatedLenCallExpr):
+        assert(expr.args()[0].type.is_slice())
+        return f'({codegen_expr(expr.args()[0])}.length)'
     elif isinstance(expr, ValidatedSliceExpr):
         slice_type_name = c_typename_with_wrapped_pointers(expr.type)
 
@@ -357,6 +359,11 @@ def codegen_stmt(stmt: ValidatedStatement) -> str:
             out += f'{codegen_expr(stmt.to())} = {codegen_expr(stmt.expr())};\n'
     elif isinstance(stmt, ValidatedExpressionStmt):
         out += codegen_expr(stmt.expr()) + ';\n'
+    elif isinstance(stmt, ValidatedBlock):
+        out += '{\n'
+        for substmt in stmt.statements():
+            out += codegen_stmt(substmt)
+        out += '}\n'
     else:
         raise NotImplementedError(stmt)
 
@@ -504,6 +511,9 @@ def codegen_module(validated_module: ValidatedModule) -> str:
         if isinstance(node, ValidatedComptimeValueExpr):
             for slicevalue, type in collect_slicevalues(node.value, node.type):
                 slicevalue.ref = init(slicevalue.ptr, CompleteType(Array(len(slicevalue.ptr)), type.next))
+
+        if isinstance(node, ValidatedBlock):
+            return True
 
         if isinstance(node, ValidatedStatement) and node.is_comptime:
             return False
