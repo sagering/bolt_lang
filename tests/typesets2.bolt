@@ -1,0 +1,20 @@
+@ints : typeset = i8 | i32 | i64 | u8 | u32 | u64
+
+addOnes(@T : ints, vals : []T) : []T {
+    i := 0
+    while i < len(vals) {
+        vals[i] = vals[i] + 1
+    }
+    return vals
+}
+
+test2() : i32 {
+    vals : i32 = [0, 1]
+    addOnes(i32, vals)
+    return 0
+}
+
+main() : i32 {
+    test2()
+    return 0
+}

@@ -252,7 +252,7 @@ def codegen_expr(expr: ValidatedExpression) -> str:
     elif isinstance(expr, ValidatedBinaryOperationExpr):
         return f'({codegen_expr(expr.lhs())}{expr.op.literal()}{codegen_expr(expr.rhs())})'
     elif isinstance(expr, ValidatedCallExpr):
-        return f'({expr.name}({",".join([codegen_expr(arg) for arg in expr.args()[expr.comptime_arg_count:]])}))'
+        return f'({expr.function_lookup_name}({",".join([codegen_expr(arg) for arg in expr.args()[expr.comptime_arg_count:]])}))'
     elif isinstance(expr, ValidatedDotExpr):
         deref = '*' if expr.auto_deref else ''
         return f'(({deref}{codegen_expr(expr.expr())}).{expr.name().name})'
@@ -300,7 +300,7 @@ def codegen_function_definition(validated_function_definition: ValidatedFunction
     out = 'extern "C" ' if validated_function_definition.is_extern else ''
     pars = ','.join([f'{c_typename_with_ptrs(par.type_expr().value)} {par.name}' for par in
                      filter(lambda par: not par.is_comptime, validated_function_definition.pars())])
-    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().value)} {validated_function_definition.name().name}({pars})'
+    out += f'{c_typename_with_ptrs(validated_function_definition.return_type().value)} {validated_function_definition.lookup_name}({pars})'
 
     if predeclaration:
         out += ';\n'
