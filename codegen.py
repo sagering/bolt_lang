@@ -383,7 +383,7 @@ def codegen_function_predeclarations(validated_module: ValidatedModule) -> str:
 
     for function in validated_module.scope.functions:
         if isinstance(function, ValidatedFunctionDefinition):
-            if function.is_incomplete and not function.is_extern or function.is_comptime: continue
+            if function.is_declaration and not function.is_extern or function.is_comptime or function.is_incomplete: continue
             out += codegen_function_definition(function, predeclaration=True)
 
     return out
@@ -393,7 +393,7 @@ def codegen_function_definitions(validated_module: ValidatedModule) -> str:
     out = '// FUNCTION DEFINITIONS\n'
 
     for function in validated_module.scope.functions:
-        if function.is_incomplete or function.is_comptime: continue
+        if function.is_declaration or function.is_extern or function.is_incomplete or function.is_comptime: continue
         out += codegen_function_definition(function, predeclaration=False)
 
     return out
@@ -406,7 +406,7 @@ def codegen_module(validated_module: ValidatedModule) -> str:
     type_dict = {}
 
     def collect_types(node: ValidatedNode) -> bool:
-        if isinstance(node, ValidatedFunctionDefinition) and node.is_incomplete:
+        if isinstance(node, ValidatedFunctionDefinition) and (node.is_incomplete or node.is_comptime):
             return False
 
         if isinstance(node, ValidatedComptimeValueExpr) and node.type.is_type():

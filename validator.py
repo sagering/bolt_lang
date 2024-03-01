@@ -244,6 +244,8 @@ class CompleteType:
             return f'@function:({pars})->({function_ptr.ret.to_string()})'
         elif self.is_typesetvalue():
             return f"typesetvalue{{{','.join([t.to_string() for t in self.get().typeset.types])}}}"
+        elif self.is_type():
+            return f"type{{{','.join([t.to_string() for t in self.get().types])}}}"
         else:
             raise NotImplementedError(self.get())
 
@@ -725,6 +727,7 @@ class ValidatedParameter:
     children: list['ValidatedNode']
     span: Span
     name: str
+    bound_value : Value | None
     type: 'CompleteType'
     is_comptime: bool
 
@@ -811,7 +814,8 @@ class ValidatedVariableDeclarationStmt:
     is_comptime: bool
     name: str
 
-    def type_expr(self) -> ValidatedExpression: return self.children[0]
+    def type_expr(self) -> ValidatedExpression:
+        return self.children[0]
 
     def initializer(self) -> ValidatedExpression: return self.children[1]
 
@@ -1000,6 +1004,9 @@ def validate_unop(scope: Scope, _: CompleteType | None, parsed_unop: ParsedUnary
         op = parsed_unop.op.op
 
         if op == Operator.Address:
+            if val_expr.is_comptime:
+                return None, ValidationError(f'cannot take the address of compile time value', parsed_unop.span)
+
             return ValidatedUnaryOperationExpr([val_expr], parsed_unop.span,
                                                CompleteType(Pointer(), val_expr.type), False,
                                                ExpressionMode.Value, parsed_unop.op.op), None
@@ -1145,8 +1152,8 @@ def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: Par
 
     function = scope.get_root_scope().find_function(callee_expr.name)
 
-    if function_ptr.is_incomplete:
-        assert function_ptr.comptime_par_cnt > 0
+    if function_ptr.is_incomplete or function_ptr.is_comptime:
+        assert function_ptr.is_comptime or function_ptr.comptime_par_cnt > 0
 
         if scope.evaluation_allowed:
             bindings : list['ValidatedComptimeValueExpr'] = []
@@ -1162,7 +1169,7 @@ def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: Par
             validated_args = validated_args[function_ptr.comptime_par_cnt:]
             function_ptr = function.type().get()
 
-            assert not function_ptr.is_comptime and not function_ptr.is_incomplete
+            assert function_ptr.is_comptime or not function_ptr.is_incomplete
 
             if scope.find_function(function.lookup_name) is None:
                 scope.get_root_scope().add_function(function)
@@ -1237,10 +1244,6 @@ def validate_initializer_expression(scope: Scope, type_hint: CompleteType | None
     if not validated_type_expr.type.is_type():
         return None, ValidationError(f'expression {validated_type_expr} does not evaluate to type',
                                      validated_type_expr.span)
-
-    if not isinstance(validated_type_expr, ValidatedComptimeValueExpr):
-        return ValidatedInitializerExpr([validated_type_expr], parsed_initializer_expr.span,
-                                        CompleteType(NamedType('unknown')), True, ExpressionMode.Value), None
 
     # no pointers allowed to be elligble to comptime evaluation:
     def check_type_contains_pointers(scope: Scope, typ: CompleteType):
@@ -1641,8 +1644,10 @@ def validate_variable_declaration(scope: Scope, evaluation_allowed : bool,
                 f'Runtime variable cannot hold compile time only values',
                 init_expr.span)
 
+        type_expr_type = CompleteType(NamedType('typeset')) if init_expr.type.is_type() else CompleteType(TypeSet([], all=True))
+
         validated_stmt = ValidatedVariableDeclarationStmt(
-            [ValidatedComptimeValueExpr([], init_expr.span, CompleteType(NamedType('type')),
+            [ValidatedComptimeValueExpr([], init_expr.span, type_expr_type,
                                         True, ExpressionMode.Value, init_expr.type),
              init_expr], parsed_variable_decl.span,
             parsed_variable_decl.is_comptime, parsed_variable_decl.name)
@@ -1651,6 +1656,7 @@ def validate_variable_declaration(scope: Scope, evaluation_allowed : bool,
     if evaluation_allowed:
         init_expr, error = try_evaluate_expression_recursively(scope, init_expr)
         if error: return None, error
+        validated_stmt.children[1] = init_expr
         if isinstance(init_expr, ValidatedComptimeValueExpr):
             init_value = init_expr.value
 
@@ -1881,7 +1887,7 @@ def validate_function_declaration(scope: Scope,
         par_type = validated_type_expr.value
 
         validated_pars.append(
-            ValidatedParameter([validated_type_expr], par.span, par.name.value, par_type, is_comptime=par.is_comptime))
+            ValidatedParameter([validated_type_expr], par.span, par.name.value, bound_value=None, type=par_type, is_comptime=par.is_comptime))
 
         child_scope.add_var(
             Variable(validated_pars[-1].name, par_type, None, par.is_comptime))
@@ -1895,10 +1901,12 @@ def validate_function_declaration(scope: Scope,
         return None, ValidationError("Expected type or typeset", validated_return_type_expr.span)
 
     is_extern = isinstance(parsed_function_definition, ParsedExternFunctionDeclaration)
+    is_incomplete = not is_extern
+    is_comptime = not is_extern and parsed_function_definition.is_comptime
 
     return ValidatedFunctionDefinition(
-        [validated_name, validated_return_type_expr, *validated_pars], parsed_function_definition.span, lookup_name=lookup_name, is_declaration=True, is_incomplete=True,
-        is_extern=is_extern, is_comptime=False, validation_scope=scope, parsed_function_def=parsed_function_definition), None
+        [validated_name, validated_return_type_expr, *validated_pars], parsed_function_definition.span, lookup_name=lookup_name, is_declaration=True, is_incomplete=is_incomplete,
+        is_extern=is_extern, is_comptime=is_comptime, validation_scope=scope, parsed_function_def=parsed_function_definition), None
 
 
 def validate_function_definition(scope: Scope, parsed_function_definition: ParsedFunctionDefinition, bindings : list[ValidatedComptimeValueExpr] | None = None) -> (
@@ -1940,7 +1948,7 @@ def validate_function_definition(scope: Scope, parsed_function_definition: Parse
         par_type = validated_type_expr.value
 
         validated_pars.append(
-            ValidatedParameter([validated_type_expr], par.span, par.name.value, par_type, is_comptime=par.is_comptime))
+            ValidatedParameter([validated_type_expr], par.span, par.name.value, bound_value=value, type=par_type, is_comptime=par.is_comptime))
         child_scope.add_var(
             Variable(validated_pars[-1].name, par_type, value, par.is_comptime))
 
@@ -1959,7 +1967,7 @@ def validate_function_definition(scope: Scope, parsed_function_definition: Parse
 
     # once bindings are passed, we monomorphization happened and function becomes complete
     all_comptime_pars_bound = bindings is not None
-    is_incomplete = not parsed_function_definition.is_comptime and any(map(lambda par: par, parsed_function_definition.pars)) and not all_comptime_pars_bound
+    is_incomplete = not parsed_function_definition.is_comptime and any(map(lambda par: par.is_comptime, parsed_function_definition.pars)) and not all_comptime_pars_bound
     child_scope.evaluation_allowed = not(parsed_function_definition.is_comptime or is_incomplete)
 
     validated_block, error = validate_block(child_scope, child_scope.evaluation_allowed, parsed_function_definition.body)
@@ -2026,7 +2034,7 @@ def validate_struct_expr(scope: Scope, parsed_struct: ParsedStructExpression) ->
         if error: return None, error
         fields.append(validated_field)
 
-    return ValidatedStructExpr([*fields], parsed_struct.span, CompleteType(NamedType('type')), True,
+    return ValidatedStructExpr([*fields], parsed_struct.span, CompleteType(TypeSet([], all=True)), True,
                                ExpressionMode.Value, name), None
 
 
@@ -2043,19 +2051,59 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
     # 2. mixed
     # 3. runtime
 
-    # pre pass 1
     for stmt in module.body:
-        if isinstance(stmt, ParsedStructExpression):
-            validated_struct_pre, error = validate_struct_pre(root_scope, stmt)
-            if error: return None, error
-            root_scope.add_type_info(Struct(validated_struct_pre.name, [], ''))
-        elif isinstance(stmt, ParsedVariableDeclaration):
+        if not stmt.is_comptime:
+            continue
+        if isinstance(stmt, ParsedVariableDeclaration):
             validated_variable_decl, error = validate_variable_declaration(root_scope, True, stmt)
             if error: return None, error
             module_other_statements.append(validated_variable_decl)
 
-    # pre pass 2
+    # comptime
     for stmt in module.body:
+        if not stmt.is_comptime:
+            continue
+        if isinstance(stmt, ParsedFunctionDefinition):
+            validated_function_def_pre, error = validate_function_declaration(root_scope, stmt)
+            if error: return None, error
+            root_scope.add_function(validated_function_def_pre)
+
+    for stmt in module.body:
+        if not stmt.is_comptime:
+            continue
+        if isinstance(stmt, ParsedFunctionDefinition):
+            validated_function_def_pre, error = validate_function_definition(root_scope, stmt)
+            if error: return None, error
+            root_scope.add_function(validated_function_def_pre)
+
+    for stmt in module.body:
+        if not stmt.is_comptime:
+            continue
+        if isinstance(stmt, ParsedStructExpression):
+            validated_struct_expr, error = validate_expression(root_scope, None, True, stmt)
+            if error: return None, error
+            module_other_statements.append(validated_struct_expr)
+
+    for stmt in module.body:
+        if not stmt.is_comptime:
+            continue
+        if isinstance(stmt, ParsedVariableDeclaration):
+            validated_variable_decl, error = validate_variable_declaration(root_scope, True, stmt)
+            if error: return None, error
+            module_other_statements.append(validated_variable_decl)
+
+    # runtime
+    for stmt in module.body:
+        if stmt.is_comptime:
+            continue
+        if isinstance(stmt, ParsedVariableDeclaration):
+            validated_variable_decl, error = validate_variable_declaration(root_scope, True, stmt)
+            if error: return None, error
+            module_other_statements.append(validated_variable_decl)
+
+    for stmt in module.body:
+        if stmt.is_comptime:
+            continue
         if isinstance(stmt, ParsedFunctionDefinition):
             validated_function_def_pre, error = validate_function_declaration(root_scope, stmt)
             if error: return None, error
@@ -2065,46 +2113,15 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
             if error: return None, error
             root_scope.add_function(validated_function_def_pre)
 
-    # main pass 1
     for stmt in module.body:
-        if isinstance(stmt, ParsedStructExpression):
-            validated_struct_expr, error = validate_expression(root_scope, None, True, stmt)
-            if error: return None, error
-            module_other_statements.append(validated_struct_expr)
-
-    # main pass 2
-    for stmt in module.body:
+        if stmt.is_comptime:
+            continue
         if isinstance(stmt, ParsedFunctionDefinition):
-            validated_function_def, error = validate_function_definition(root_scope, stmt)
+            validated_function_def_pre, error = validate_function_definition(root_scope, stmt)
             if error: return None, error
-            module_functions.append(validated_function_def)
-            root_scope.add_function(validated_function_def)
-        elif isinstance(stmt, ParsedExternFunctionDeclaration):
-            validated_function_decl, error = validate_function_declaration(root_scope, stmt)
-            if error: return None, error
-            module_functions.append(validated_function_decl)
+            root_scope.add_function(validated_function_def_pre)
 
-
-    # for function_def in module_functions:
-    #     block = function_def.body()
-    #     for stmt in block.children:
-    #         for child in stmt.children:
-    #             if isinstance(child, ValidatedCallExpr):
-    #                 child.
-    #
-    #         function_def.
-    #
-    #     function_def.
     body = module_functions + module_other_statements
-
-
-
-
-    # main pass 3 (comptime execution and monomorphization)
-    # for stmt in body:
-    #
-    #     if
-
 
     # Determine order of structs and detect cycles.
     scopes = [root_scope]
@@ -2350,7 +2367,7 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
 
     if isinstance(expr, ValidatedCallExpr):
 
-        function_definition = scope.find_function(expr.name)
+        function_definition = scope.find_function(expr.function_lookup_name)
         execution_scope = scope.get_root_scope().add_child_scope('call')
 
         for par in function_definition.pars():

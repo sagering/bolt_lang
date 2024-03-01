@@ -240,6 +240,7 @@ class ParsedStructExpression:
     name: Optional[ParsedName]
     fields: list[ParsedField]
     span: Span
+    is_comptime : bool = True
 
 
 ParsedAtom = Union[ParsedName, ParsedNumber, ParsedArray, ParsedString]
@@ -307,20 +308,12 @@ class ParsedFunctionDefinition:
 
 
 @dataclass
-class ParsedComptimeFunctionDefinition:
-    name: ParsedName
-    pars: list[ParsedParameter]
-    return_type: 'ParsedExpression'
-    body: ParsedBlock
-    span: Span
-
-
-@dataclass
 class ParsedExternFunctionDeclaration:
     name: ParsedName
     pars: list[ParsedParameter]
     return_type: 'ParsedExpression'
     span: Span
+    is_comptime : bool = False
 
 
 @dataclass

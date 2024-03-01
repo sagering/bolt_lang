@@ -1,0 +1,17 @@
+@A := struct {
+    a : i32
+}
+
+@MyStruct() : type {
+    return struct {
+        field1 : u8
+        field2 : []u8
+        field3 : i32
+    }
+}
+
+
+main() : i32 {
+    @B := MyStruct()
+    return 0
+}

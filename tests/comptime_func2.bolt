@@ -1,4 +1,6 @@
-mixed(@T : type, a : T, b : T) : T {
+@i32ori64 : typeset = i32 | i64
+
+mixed(@T : i32ori64, a : T, b : T) : T {
     return a + b
 }
 
