@@ -16,9 +16,31 @@ print_field_names(@T : type, val : T) : i32 {
     }
 
     field(val, "field2") = 4
-        field_val := field(val, "field1")
+    field_val := field(val, "field1")
 
     return 0
+}
+
+print_u32(val : u32) : i32 {
+    print("u32")
+    return 0
+}
+
+print_i32(val : i32) : i32 {
+    print("i32")
+    return 0
+}
+
+print_value(@T : type, val : T) : i32 {
+    if(T == i32) {
+        return print_i32(val)
+    }
+
+    if(T == u32) {
+        return print_u32(val)
+    }
+
+    return print("not implemented")
 }
 
 print_struct(@T : type,  val : T) : i32 {
@@ -28,7 +50,7 @@ print_struct(@T : type,  val : T) : i32 {
     @while i < len(ti.fields) {
         @field_name := ti.fields[i].name
         field_val := field(val, field_name)
-        print(field_name)
+        print_value(field_value)
         i = i + 1
     }
 

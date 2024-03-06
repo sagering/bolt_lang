@@ -1,0 +1,27 @@
+@MyStruct := struct {
+    a : i32
+}
+
+somefunc(@T : type, x : T) : i32 {
+    if T == MyStruct {
+        return x.a
+    }
+
+    return 0
+}
+
+abc(@T : type, slice : []T) : i32 {
+    // name_expr        = slice
+    // type_expr(slice) = []T
+
+    // name_expr    = a
+    // type_expr(a) = ptr(element_type(type_expr(slice))
+
+    a := &slice[0]
+
+    if (T == i32) {
+        return *a
+    }
+
+    return 0
+}
