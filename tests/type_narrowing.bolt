@@ -2,26 +2,32 @@
     a : i32
 }
 
-somefunc(@T : type, x : T) : i32 {
-    if T == MyStruct {
-        return x.a
+do_i32(val : i32) : i32 {
+    return val
+}
+
+do_i64(val : i64) : i64 {
+    return val
+}
+
+abc(@T : type, val : T) : i32 {
+
+    if (T == i32) {
+        return do_i32(val)
+    }
+
+    if (T == i64) {
+        do_i64(val)
+        return -1
     }
 
     return 0
 }
 
-abc(@T : type, slice : []T) : i32 {
-    // name_expr        = slice
-    // type_expr(slice) = []T
+main() : i32 {
 
-    // name_expr    = a
-    // type_expr(a) = ptr(element_type(type_expr(slice))
-
-    a := &slice[0]
-
-    if (T == i32) {
-        return *a
-    }
+    abc(i32, 1)
+    abc(i64, 2)
 
     return 0
 }
