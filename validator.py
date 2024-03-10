@@ -118,6 +118,7 @@ class Struct:
         type: 'CompleteType'
 
     name: Optional[str]
+    is_comptime: bool
     fields: list[StructField]
     location: str
 
@@ -390,11 +391,12 @@ class CompleteType:
         return None
 
 
-Field = Struct("Field", [
-    Struct.StructField("name", CompleteType(Slice(), CompleteType(NamedType("u8"))))
+Field = Struct("Field", True, [
+    Struct.StructField("name", CompleteType(Slice(), CompleteType(NamedType("u8")))),
+    Struct.StructField("type", CompleteType(TypeSet([], all=True)))
 ], '')
 
-TypeInfo = Struct("TypeInfo", [
+TypeInfo = Struct("TypeInfo", True, [
     Struct.StructField("fields", CompleteType(Slice(), CompleteType(NamedType("Field"))))
 ], '')
 
@@ -931,9 +933,11 @@ class ValidatedVariableDeclarationStmt:
     name: str
 
     def type_expr(self) -> ValidatedExpression:
-        return self.children[0]
+        if len(self.children) == 2:
+            return self.children[0]
+        return ValidatedComptimeValueExpr([], self.span, CompleteType(TypeSet([], all=True)), True, ExpressionMode.Value, self.initializer().type)
 
-    def initializer(self) -> ValidatedExpression: return self.children[1]
+    def initializer(self) -> ValidatedExpression: return self.children[len(self.children) - 1]
 
 
 @dataclass
@@ -1240,7 +1244,7 @@ def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: Par
             field_type = CompleteType(Untyped())
 
         return ValidatedDotExpr([validated_arg0, ValidatedName([], validated_arg1.span, field_name)], parsed_call.span, field_type,
-                                validated_arg0.is_comptime, ExpressionMode.Variable, False), None
+                                validated_arg0.is_comptime, ExpressionMode.Variable), None
 
     if isinstance(parsed_call.expr, ParsedName) and parsed_call.expr.value == 'len':
         if len(parsed_call.args) != 1:
@@ -1365,7 +1369,6 @@ def validate_dot_expr(scope: Scope, type_hint: CompleteType | None,
     dot_into = None
     auto_deref = False
 
-    # pointers should always have a next type
     if validated_expr_type.is_pointer():
         auto_deref = True
         dot_into = validated_expr.type().next
@@ -1378,9 +1381,13 @@ def validate_dot_expr(scope: Scope, type_hint: CompleteType | None,
 
     if type_info := scope.get_type_info(dot_into.named_type().name):
         if field := type_info.try_get_field(validated_name.name):
-            return ValidatedDotExpr([validated_expr, validated_name], parsed_dot_expr.span, field.type,
+            dot_expr = ValidatedDotExpr([validated_expr, validated_name], parsed_dot_expr.span, field.type,
                                     validated_expr.is_comptime,
-                                    validated_expr.mode, auto_deref), None
+                                    validated_expr.mode)
+            if auto_deref:
+                return ValidatedDerefExpression([dot_expr], parsed_dot_expr.span, dot_into, validated_expr.is_comptime,
+                                               validated_expr.mode), None
+            return dot_expr, None
 
     return None, ValidationError(f'field {validated_name.name} not found', parsed_dot_expr.span)
 
@@ -1653,6 +1660,7 @@ def evaluate_expression(scope: Scope, validated_expr: ValidatedExpression) -> (
                                      validated_expr.span)
 
     value = do_evaluate_expr(validated_expr, scope)
+    assert value is not None
     type = validated_expr.type
     return ValidatedComptimeValueExpr([], validated_expr.span, type, True, ExpressionMode.Value,
                                       value), None
@@ -1909,28 +1917,35 @@ def comptime_assign(scope: Scope, to_expr: ValidatedExpression, value_expr: Vali
 
 
 def get_comptime_value(scope: Scope, expr: ValidatedExpression) -> Value:
-    expr_type = expr.type
-
     if isinstance(expr, ValidatedNameExpr):
         var, _ = scope.lookup_var(expr.name)
+        assert var.value is not None
         return var.value
     elif isinstance(expr, ValidatedIndexExpr):
         index = do_evaluate_expr(expr.index(), scope)
         value = get_comptime_value(scope, expr.expr())
-        if expr_type.is_array():
+        if expr.expr().type.is_array():
             assert (isinstance(value, list))
             assert (index < len(value))
-            return value[index]
-        if expr_type.is_slice():
+            value = value[index]
+            assert value is not None
+            return value
+        if expr.expr().type.is_slice():
             assert (isinstance(value, SliceValue))
             assert (isinstance(value.ptr, list))
             assert (value.start + index < len(value.ptr))
             assert (value.start + index < value.end)
-            return value.ptr[value.start + index]
+            value = value.ptr[value.start + index]
+            assert value is not None
+            return value
+        raise NotImplementedError(f"Index expr: {expr_type}")
     elif isinstance(expr, ValidatedDotExpr):
         value = get_comptime_value(scope, expr.expr())
-        return value[expr.name().name]
+        value = value[expr.name().name]
+        assert value is not None
+        return value
     elif isinstance(expr, ValidatedComptimeValueExpr):
+        assert expr.value is not None
         return expr.value
     else:
         raise NotImplementedError(expr)
@@ -1996,18 +2011,18 @@ def validate_function_declaration(scope: Scope,
 
     # check parameter types
     for par in parsed_function_definition.pars:
-        validated_type_expr, _, error = validate_type_expr(child_scope, par.type)
+        validated_type_expr, par_type_value_expr, error = validate_type_expr(child_scope, par.type)
         if error: return None, error
 
         validated_pars.append(
-            ValidatedParameter([validated_type_expr], par.span, par.name.value, bound_value=None,
+            ValidatedParameter([par_type_value_expr], par.span, par.name.value, bound_value=None,
                                is_comptime=par.is_comptime))
 
         child_scope.add_var(
             Variable(validated_pars[-1].name, None, par.is_comptime, VariableType(validated_type_expr, True)))
 
     # check return type
-    validated_return_type_expr, _, error = validate_type_expr(child_scope, parsed_function_definition.return_type)
+    validated_return_type_expr, return_type_value_expr, error = validate_type_expr(child_scope, parsed_function_definition.return_type)
     if error: return None, error
 
     is_extern = isinstance(parsed_function_definition, ParsedExternFunctionDeclaration)
@@ -2015,7 +2030,7 @@ def validate_function_declaration(scope: Scope,
     is_comptime = not is_extern and parsed_function_definition.is_comptime
 
     return ValidatedFunctionDefinition(
-        [validated_name, validated_return_type_expr, *validated_pars], parsed_function_definition.span,
+        [validated_name, return_type_value_expr, *validated_pars], parsed_function_definition.span,
         lookup_name=lookup_name, is_declaration=True, is_incomplete=is_incomplete,
         is_extern=is_extern, is_comptime=is_comptime, validation_scope=scope,
         parsed_function_def=parsed_function_definition), None
@@ -2248,6 +2263,9 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
     no_dependency = set()
 
     for struct_id, struct in struct_dict.items():
+        if struct.is_comptime:
+            continue
+
         for field in struct.fields:
             current = field.type
 
@@ -2493,7 +2511,7 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
     if isinstance(expr, ValidatedTypeInfoCallExpr):
         value = do_evaluate_expr(expr.args()[0], scope)
         struct = scope.get_type_info(value.named_type().name)
-        fields = list(map(lambda field: {"name": str_to_slicevalue(field.name)}, struct.fields))
+        fields = list(map(lambda field: {"name": str_to_slicevalue(field.name), "type": field.type}, struct.fields))
         return {"name": str_to_slicevalue(struct.name), "fields": SliceValue(0, len(fields), fields)}
 
     if isinstance(expr, ValidatedStructExpr):
@@ -2512,7 +2530,8 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
         if name is None:
             name = '___anonymous_struct__' + str(signature)
 
-        struct = Struct(name, fields, '')
+        # TODO: set "is_comptime" to proper value
+        struct = Struct(name, False, fields, '')
         scope.get_root_scope().add_type_info(struct)
         return CompleteType(NamedType(struct.name))
 
@@ -2548,6 +2567,7 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
         return comptime_initialize_value(expr_type)
 
     if isinstance(expr, ValidatedIndexExpr):
+        print(f"evaluating index expr: {expr}")
         return get_comptime_value(scope, expr)
 
     if isinstance(expr, ValidatedLenCallExpr):
@@ -2598,6 +2618,9 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
     
     if isinstance(expr, ValidatedSliceTypeExpression):
         return CompleteType(Slice(), do_evaluate_expr(expr.rhs(), scope))
+
+    if isinstance(expr, ValidatedPointerTypeExpression):
+        return CompleteType(Pointer(), do_evaluate_expr(expr.rhs(), scope))
 
     raise NotImplementedError(expr)
 

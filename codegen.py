@@ -8,7 +8,7 @@ from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedRet
     ValidatedExpression, ValidatedNameExpr, ValidatedComptimeValueExpr, ValidatedCallExpr, ValidatedBinaryOperationExpr, \
     ValidatedUnaryOperationExpr, ValidatedDotExpr, ValidatedIndexExpr, ValidatedInitializerExpr, \
     ValidatedStatement, CompleteType, ValidatedNode, visit_nodes, \
-    ValidatedArrayExpr, ValidatedExternFunctionDeclaration, \
+    ValidatedArrayExpr, ValidatedExternFunctionDeclaration, ValidatedAddressExpression, \
     ValidatedSliceExpr, SliceBoundaryPlaceholder, ValidatedAssignmentStmt, Struct, Value
 
 string_table: dict[str, int] = dict()
@@ -254,8 +254,7 @@ def codegen_expr(expr: ValidatedExpression) -> str:
     elif isinstance(expr, ValidatedCallExpr):
         return f'({expr.function_lookup_name}({",".join([codegen_expr(arg) for arg in expr.args()[expr.comptime_arg_count:]])}))'
     elif isinstance(expr, ValidatedDotExpr):
-        deref = '*' if expr.auto_deref else ''
-        return f'(({deref}{codegen_expr(expr.expr())}).{expr.name().name})'
+        return f'(({codegen_expr(expr.expr())}).{expr.name().name})'
     elif isinstance(expr, ValidatedInitializerExpr):
         return f'(({c_typename_with_ptrs(expr.type)})' + '{})'
     elif isinstance(expr, ValidatedIndexExpr):
@@ -291,6 +290,8 @@ def codegen_expr(expr: ValidatedExpression) -> str:
 
         return f'({slice_type_name}{{{codegen_expr(expr.src())}.to + {slice_start}, ({slice_end} - {slice_start})}})'
 
+    elif isinstance(expr, ValidatedAddressExpression):
+        return f'(&{codegen_expr(expr.rhs())})'
     else:
         raise NotImplementedError(expr)
 
@@ -432,6 +433,8 @@ def codegen_module(validated_module: ValidatedModule) -> str:
             scopes.append(child)
 
     for type_info in type_infos.values():
+        if type_info.is_comptime:
+            continue
 
         type_dict[type_info.name] = CompleteType(NamedType(type_info.name))
 
