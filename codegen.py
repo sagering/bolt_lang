@@ -410,8 +410,11 @@ def codegen_module(validated_module: ValidatedModule) -> str:
         if isinstance(node, ValidatedFunctionDefinition) and (node.is_incomplete or node.is_comptime):
             return False
 
-        if isinstance(node, ValidatedComptimeValueExpr) and node.type.is_type():
-            type = node.value
+        if isinstance(node, ValidatedComptimeValueExpr):
+            if node.type.is_type():
+                type = node.value
+            else:
+                type = node.type
             while type:
                 type_dict[type.to_string()] = type
                 type = type.next
