@@ -1,7 +1,7 @@
 from lexer import lex
 from parser import TokenSource, parse_module, print_parser_error
 from validator import validate_module, ArrayValue, StructValue, Array, ValidatedExpressionStmt, SliceValue, NamedType, \
-    ValidatedLenCallExpr, ValidatedBlock
+    ValidatedLenCallExpr, ValidatedBlock, ValidatedDerefExpression
 from collections import defaultdict
 from validator import ValidatedModule, ValidatedFunctionDefinition, ValidatedReturnStmt, \
     ValidatedVariableDeclarationStmt, ValidatedWhileStmt, ValidatedBreakStmt, ValidatedIfStmt, \
@@ -292,6 +292,8 @@ def codegen_expr(expr: ValidatedExpression) -> str:
 
     elif isinstance(expr, ValidatedAddressExpression):
         return f'(&{codegen_expr(expr.rhs())})'
+    elif isinstance(expr, ValidatedDerefExpression):
+        return f'(*{codegen_expr(expr.rhs())})'
     else:
         raise NotImplementedError(expr)
 
@@ -409,6 +411,13 @@ def codegen_module(validated_module: ValidatedModule) -> str:
     def collect_types(node: ValidatedNode) -> bool:
         if isinstance(node, ValidatedFunctionDefinition) and (node.is_incomplete or node.is_comptime):
             return False
+
+        # TODO: We assumed that for every type that occurs there is a corresponding ValidatedComptimeValueExpr,
+        #       which isn't the case for ValidatedVariableDeclarationStmt.
+        if isinstance(node, ValidatedVariableDeclarationStmt):
+            if node.is_comptime:
+                return False
+            node = node.type_expr()
 
         if isinstance(node, ValidatedComptimeValueExpr):
             if node.type.is_type():
