@@ -165,7 +165,7 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: d
     # Dependency graph has cycles there are any edges left, i.e. if any of node's out edge list is not empty.
     # This is not supposed to happen because the types should have been checked already in the validate step.
     for type_id, edges in out_edges.items():
-        assert (len(edges) == 0)
+        assert (len(edges) == 0), f"{type_id}, {edges}"
 
     out = '// STRUCT DEFINITIONS\n'
     for key in ordered:

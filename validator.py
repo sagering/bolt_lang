@@ -269,7 +269,8 @@ class CompleteType:
             pars = ','.join([par.to_string() for par in function_ptr.pars])
             return f'@function:({pars})->({function_ptr.ret.to_string()})'
         elif self.is_typesetvalue():
-            return f"typesetvalue{{{','.join([t.to_string() for t in self.get().typeset.types])}}}"
+            tsv = self.get()
+            return f"typesetvalue({tsv.name}){{{','.join([t.to_string() for t in tsv.typeset.types])}}}"
         elif self.is_type():
             return f"type{{{','.join([t.to_string() for t in self.get().types])}}}"
         else:
@@ -336,6 +337,10 @@ class CompleteType:
 
         if self.is_type() and other.is_type():
             return self.val.includes(other.val)
+
+        # TODO: Same for arrays, pointers, etc.
+        if self.is_slice() and other.is_slice():
+            return self.next.eq_or_safely_convertible_from(other.next)
 
         return self.eq(other)
 
@@ -1763,15 +1768,13 @@ def validate_variable_declaration(scope: Scope, evaluation_allowed: bool,
         validated_type_expr, type_value_expr, error = validate_type_expr(scope, parsed_variable_decl.type)
         if error: return None, error
 
-        init_expr, error = validate_expression(scope, None, False, parsed_variable_decl.initializer)
+        init_expr, error = validate_expression(scope, type_value_expr.value, False, parsed_variable_decl.initializer)
         if error: return None, error
 
         if init_expr.type.is_type() and not parsed_variable_decl.is_comptime:
             return None, ValidationError(
                 f'Runtime variable cannot hold compile time only values',
                 init_expr.span)
-
-        # print(f'init_expr: {init_expr}, type_value_expr: {type_value_expr}')
 
         if not check_assignability(type_value_expr.value, init_expr.type):
             return None, ValidationError(
@@ -2141,7 +2144,7 @@ def validate_function_definition(scope: Scope, parsed_function_definition: Parse
 
     if not return_type_value_expr.value.eq_or_safely_convertible_from(validated_return_stmt.expr().type):
         return None, ValidationError(
-            f'Return type mismatch in function "{parsed_function_definition.name.value}": declared return type is {validated_return_type_expr.value}, but returning expression of type {validated_return_stmt.expr().type}',
+            f'Return type mismatch in function "{parsed_function_definition.name.value}": declared return type is {return_type_value_expr.value}, but returning expression of type {validated_return_stmt.expr().type}',
             parsed_function_definition.span)
 
     return ValidatedFunctionDefinition(
@@ -2512,7 +2515,7 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
                     lhs_typeset = lhs.get()
 
                 rhs = do_evaluate_expr(expr.rhs(), scope)
-                rhs_type = expr.lhs().type
+                rhs_type = expr.rhs().type
 
                 if rhs_type.is_type():
                     assert rhs_type.is_type()
@@ -2526,7 +2529,7 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
                     for l in lhs_typeset.types:
                         if r.eq(l):
                             continue
-                        added.append(r)
+                    added.append(r)
 
                 lhs_typeset.types += added
                 return CompleteType(lhs_typeset)
