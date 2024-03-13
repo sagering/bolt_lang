@@ -125,10 +125,11 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: d
         if type.is_pointer() or type.is_slice():
             continue
 
-        if type.is_named_type() and not type.is_builtin() and not type.named_type().name == 'TypeInfo':
+        if type.is_named_type() and not type.is_builtin():
             struct = type_infos[type.named_type().name]
             for field in struct.fields:
-
+                if field.is_comptime:
+                    continue
                 if field.type.is_pointer() or field.type.is_slice() or field.type.is_builtin():
                     continue
 
@@ -179,6 +180,8 @@ def codegen_struct_definitions(type_dict: dict[str, CompleteType], type_infos: d
 
             out += f'struct {c_typename_with_wrapped_pointers(type)} {{\n'
             for field in struct.fields:
+                if field.is_comptime:
+                    continue
                 if field.type.is_pointer():
                     pointers = ''
                     t = field.type
@@ -225,7 +228,8 @@ def codegen_value(value: Value, type: CompleteType) -> str:
         return f'{{ .array = {{ {",".join(codegen_value(v, type.next) for v in value)} }} }}'
     if isinstance(value, dict):
         ti = type_infos[type.named_type().name]
-        fields = ','.join([f".{field.name} = {codegen_value(value[field.name], field.type)}" for field in ti.fields])
+        rt_fields = filter(lambda field: not field.is_comptime, ti.fields)
+        fields = ','.join([f".{field.name} = {codegen_value(value[field.name], field.type)}" for field in rt_fields ])
         return f'{{ {fields} }}'
     if isinstance(value, SliceValue):
         slice_type_name = c_typename_with_wrapped_pointers(type)
@@ -445,12 +449,11 @@ def codegen_module(validated_module: ValidatedModule) -> str:
             scopes.append(child)
 
     for type_info in type_infos.values():
-        if type_info.is_comptime:
-            continue
-
         type_dict[type_info.name] = CompleteType(NamedType(type_info.name))
 
         for field in type_info.fields:
+            if field.is_comptime:
+                continue
             type = field.type
             while type:
                 type_dict[type.to_string()] = type
@@ -467,7 +470,8 @@ def codegen_module(validated_module: ValidatedModule) -> str:
         if type.is_struct():
             name = type.named_type().name
             ti = type_infos[name]
-            fields = ", ".join([f".{field.name} = {init_rec(val[field.name], field.type)}" for field in ti.fields])
+            rt_fields = filter(lambda field: not field.is_comptime, ti.fields)
+            fields = ", ".join([f".{field.name} = {init_rec(val[field.name], field.type)}" for field in rt_fields])
             out += f'{c_typename_with_ptrs(type)} {{ {fields} }}'
         if type.is_u8():
             out += f'{val}'

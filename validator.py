@@ -116,9 +116,9 @@ class Struct:
     class StructField:
         name: str
         type: 'CompleteType'
+        is_comptime: bool
 
     name: Optional[str]
-    is_comptime: bool
     fields: list[StructField]
     location: str
 
@@ -406,13 +406,13 @@ class CompleteType:
         return None
 
 
-Field = Struct("Field", True, [
-    Struct.StructField("name", CompleteType(Slice(), CompleteType(NamedType("u8")))),
-    Struct.StructField("type", CompleteType(TypeSet([], all=True)))
+Field = Struct("Field", [
+    Struct.StructField("name", CompleteType(Slice(), CompleteType(NamedType("u8"))), False),
+    Struct.StructField("type", CompleteType(TypeSet([], all=True)), True)
 ], '')
 
-TypeInfo = Struct("TypeInfo", True, [
-    Struct.StructField("fields", CompleteType(Slice(), CompleteType(NamedType("Field"))))
+TypeInfo = Struct("TypeInfo", [
+    Struct.StructField("fields", CompleteType(Slice(), CompleteType(NamedType("Field"))), False)
 ], '')
 
 
@@ -2227,7 +2227,7 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
         if isinstance(stmt, ParsedStructExpression):
             validated_struct_pre, error = validate_struct_pre(root_scope, stmt)
             if error: return None, error
-            root_scope.add_type_info(Struct(validated_struct_pre.name, False, [], ''))
+            root_scope.add_type_info(Struct(validated_struct_pre.name, [], ''))
 
     for stmt in module.body:
         if not stmt.is_comptime:
@@ -2305,10 +2305,10 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
     no_dependency = set()
 
     for struct_id, struct in struct_dict.items():
-        if struct.is_comptime:
-            continue
-
         for field in struct.fields:
+            if field.is_comptime:
+                continue
+
             current = field.type
 
             # TODO: Handle optionals properly, once introduced. Optionals to a unsized derivative of a struct, e.g.
@@ -2563,7 +2563,8 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
 
         for field in expr.fields():
             field_type = do_evaluate_expr(field.type_expr(), scope)
-            fields.append(Struct.StructField(field.name().name, field_type))
+            field_is_comptime = field_type.is_type() or field_type.is_typeset()
+            fields.append(Struct.StructField(field.name().name, field_type, field_is_comptime))
             signature += f"{field.name().name}_{field_type.to_string()}__"
 
         signature = hash(signature) + sys.maxsize + 1  # we want positive numbers
@@ -2572,8 +2573,7 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
         if name is None:
             name = '___anonymous_struct__' + str(signature)
 
-        # TODO: set "is_comptime" to proper value
-        struct = Struct(name, False, fields, '')
+        struct = Struct(name, fields, '')
         scope.get_root_scope().add_type_info(struct)
         return CompleteType(NamedType(struct.name))
 

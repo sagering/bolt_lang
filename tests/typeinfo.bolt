@@ -1,33 +1,19 @@
 extern write(fd : i32, buffer : *u8, count : u64) : u64
 
-print(str : []u8) : i32 {
+println(str : []u8) : i32 {
     write(1, &str[0], len(str))
-    return 0
-}
-
-print_field_names(@T : type, val : T) : i32 {
-    @ti := typeinfo(T)
-
-    i := 0
-    while i < len(ti.fields) {
-        name := ti.fields[i].name
-        print(name)
-        i = i + 1
-    }
-
-    field(val, "field2") = 4
-    field_val := field(val, "field1")
-
+    newline_ascii_code : u8 = 10
+    write(1, &newline_ascii_code, 1)
     return 0
 }
 
 print_u32(val : u32) : i32 {
-    print("u32")
+    println("u32")
     return 0
 }
 
 print_i32(val : i32) : i32 {
-    print("i32")
+    println("i32")
     return 0
 }
 
@@ -40,7 +26,7 @@ print_value(@T : type, val : T) : i32 {
         return print_u32(val)
     }
 
-    return print("not implemented")
+    return println("not implemented")
 }
 
 print_struct(@T : type,  val : T) : i32 {
@@ -51,6 +37,7 @@ print_struct(@T : type,  val : T) : i32 {
         @field_name := ti.fields[i].name
         @field_type := ti.fields[i].type
         field_val := field(val, field_name)
+        println(field_name)
         print_value(field_type, field_val)
         i = i + 1
     }
@@ -63,11 +50,11 @@ main() : i32 {
     @A := struct {
         field1 : i32
         field2 : i64
+        field3 : u32
     }
 
     a := A{}
 
-    print_field_names(A, a)
     print_struct(A, a)
 
     return 0
