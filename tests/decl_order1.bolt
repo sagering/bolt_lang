@@ -1,0 +1,54 @@
+
+@getReturnType1() : type {
+    return i32
+}
+
+f1() : getReturnType1() {
+    return 42
+}
+
+f2() : getReturnType2() {
+    return 42
+}
+
+@getReturnType2() : type {
+    return i32
+}
+
+struct ReturnType3 {
+    x : i32
+}
+
+f3() : ReturnType3 {
+    return ReturnType3{}
+}
+
+f4() : ReturnType4 {
+    return ReturnType4{}
+}
+
+struct ReturnType4 {
+    x : i32
+}
+
+@Return(i : i32) : type {
+    types : [4]type = [i8, i16, i32, i64]
+    return types[i]
+}
+
+@Wrap() : type {
+    return Return(0)
+}
+
+f5() : Wrap() {
+    return 42
+}
+
+main() : i32 {
+    f1()
+    f2()
+    f3()
+    f4()
+    f5()
+    return 0
+}

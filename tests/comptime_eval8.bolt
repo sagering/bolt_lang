@@ -1,0 +1,15 @@
+
+
+index() : i32 {
+    return 0
+}
+
+@other() : i32 {
+    tmp := [1, 2, 3]
+    tmp[0] = 2
+    return tmp[index()]
+}
+
+main() : i32 {
+    return other()
+}

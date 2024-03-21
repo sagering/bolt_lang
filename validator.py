@@ -1224,8 +1224,9 @@ def get_struct_field_type(scope: Scope, struct_type: CompleteType, field_name: s
     assert False, "not reached"
 
 
-def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: ParsedCall) -> (
+def validate_builtin_call(scope: Scope, type_hint: CompleteType, parsed_call: ParsedCall) -> (
         ValidatedCallExpr | ValidatedTypeInfoCallExpr | ValidatedLenCallExpr | None, ValidationError | None):
+
     if isinstance(parsed_call.expr, ParsedName) and parsed_call.expr.value == 'typeinfo':
         if len(parsed_call.args) != 1:
             return None, ValidationError(
@@ -1255,6 +1256,7 @@ def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: Par
         if scope.evaluation_allowed:
             validated_arg1, error = try_evaluate_expression_recursively(scope, validated_arg1)
             if error: return None, error
+
         arg1_type = validated_arg1.type
         if not (arg1_type.is_slice() and arg1_type.next.is_u8()):
             return None, ValidationError(
@@ -1296,29 +1298,12 @@ def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: Par
         return ValidatedLenCallExpr([validated_arg], parsed_call.span, CompleteType(NamedType('u32')),
                                     validated_arg.is_comptime, mode=ExpressionMode.Value), None
 
-    # Assumption: validated_expr will be a ValidatedNameExpr
-    callee_expr, error = validate_expression(scope, None, False, parsed_call.expr)
-    if error: return None, error
+    return None, None
 
-    calle_expr_type = callee_expr.type
 
-    if not calle_expr_type.is_function_ptr():
-        return None, ValidationError(f'expression type {calle_expr_type.get()} not a function pointer',
-                                     callee_expr.span)
-
-    validated_args: list[ValidatedExpression] = []
-
-    for arg in parsed_call.args:
-        expr, error = validate_expression(scope, None, False, arg)
-        if error: return None, error
-        validated_args.append(expr)
-
-    function_ptr: FunctionPointer = calle_expr_type.get()
-
-    if len(function_ptr.pars) != len(validated_args):
-        return None, ValidationError(f'Wrong number of arguments in call to function', parsed_call.span)
-
-    function = scope.get_root_scope().find_function(callee_expr.name)
+def get_function_and_monomorphize_if_necessary(scope: Scope, name: str, validated_args : list[ValidatedExpression]) -> tuple[ValidatedFunctionDefinition | None, ValidationError | None]:
+    function = scope.get_root_scope().find_function(name)
+    function_ptr = function.type().get()
 
     if function_ptr.is_incomplete or function_ptr.is_comptime:
         assert function_ptr.is_comptime or function_ptr.comptime_par_cnt > 0
@@ -1341,6 +1326,41 @@ def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: Par
 
             if scope.find_function(function.lookup_name) is None:
                 scope.get_root_scope().add_function(function)
+
+    return function, None
+
+
+def validate_call(scope: Scope, type_hint: CompleteType | None, parsed_call: ParsedCall) -> (
+        ValidatedCallExpr | ValidatedTypeInfoCallExpr | ValidatedLenCallExpr | None, ValidationError | None):
+
+    call, error = validate_builtin_call(scope, type_hint, parsed_call)
+    if error: return None, error
+    if call: return call, None
+
+    # Assumption: validated_expr will be a ValidatedNameExpr
+    callee_expr, error = validate_expression(scope, None, False, parsed_call.expr)
+    if error: return None, error
+
+    if not callee_expr.type.is_function_ptr():
+        return None, ValidationError(f'expression type {callee_expr.type.get()} not a function pointer',
+                                     callee_expr.span)
+
+    validated_args: list[ValidatedExpression] = []
+
+    for arg in parsed_call.args:
+        expr, error = validate_expression(scope, None, False, arg)
+        if error: return None, error
+        validated_args.append(expr)
+
+    function_ptr : FunctionPointer = callee_expr.type.get()
+
+    if len(function_ptr.pars) != len(validated_args):
+        return None, ValidationError(f'Wrong number of arguments in call to function', parsed_call.span)
+
+    function, error = get_function_and_monomorphize_if_necessary(scope, callee_expr.name, validated_args)
+    if error: return None, error
+
+    function_ptr = function.type().get()
 
     for idx, (par_type, arg) in enumerate(zip(function_ptr.pars, validated_args)):
         if not par_type.eq_or_safely_convertible_from(arg.type):
@@ -1866,13 +1886,6 @@ def validate_break_stmt(scope: Scope, parsed_break: ParsedBreakStatement) -> tup
 VariableDeclaringNode = ValidatedVariableDeclarationStmt | ValidatedParameter
 
 
-def hallo(a: VariableDeclaringNode):
-    if isinstance(a, ValidatedVariableDeclarationStmt):
-        type_expr = a.type_expr()
-
-    pass
-
-
 def validate_if_stmt(scope: Scope, evaluation_allowed: bool, parsed_if: ParsedIfStatement) -> (
         ValidatedIfStmt | None, ValidationError | None):
     condition, error = validate_expression(scope, CompleteType(NamedType('bool')), False, parsed_if.condition)
@@ -1913,6 +1926,10 @@ def validate_assignment_stmt(scope: Scope, evaluation_allowed: bool, parsed_assi
     if validated_to_expr.mode != ExpressionMode.Variable:
         return None, ValidationError(f'cannot assign to value', parsed_assignment.to.span)
 
+    # if validated_to_expr.is_comptime:
+    #     # TODO: Check if underlying variable is not in the same scope
+    #     return None, ValidationError(f'cannot assign to comptime value', parsed_assignment.to.span)
+
     assignment_target_type = validated_to_expr.type
 
     value_expr, error = validate_expression(scope, None, False, parsed_assignment.value)
@@ -1937,55 +1954,6 @@ def validate_assignment_stmt(scope: Scope, evaluation_allowed: bool, parsed_assi
 
     return validated_stmt, None
 
-
-def comptime_assign(scope: Scope, to_expr: ValidatedExpression, value_expr: ValidatedComptimeValueExpr):
-    if isinstance(to_expr, ValidatedNameExpr):
-        var, _ = scope.lookup_var(to_expr.name)
-        var.value = value_expr.value
-    elif isinstance(to_expr, ValidatedIndexExpr):
-        index = do_evaluate_expr(to_expr.index(), scope)
-        value = get_comptime_value(scope, to_expr.expr())
-        value[index] = value_expr.value
-    elif isinstance(to_expr, ValidatedDotExpr):
-        value = get_comptime_value(scope, to_expr.expr())
-        value[to_expr.name().name] = value_expr.value
-    else:
-        raise NotImplementedError()
-
-
-def get_comptime_value(scope: Scope, expr: ValidatedExpression) -> Value:
-    if isinstance(expr, ValidatedNameExpr):
-        var, _ = scope.lookup_var(expr.name)
-        assert var.value is not None
-        return var.value
-    elif isinstance(expr, ValidatedIndexExpr):
-        index = do_evaluate_expr(expr.index(), scope)
-        value = get_comptime_value(scope, expr.expr())
-        if expr.expr().type.is_array():
-            assert (isinstance(value, list))
-            assert (index < len(value))
-            value = value[index]
-            assert value is not None
-            return value
-        if expr.expr().type.is_slice():
-            assert (isinstance(value, SliceValue))
-            assert (isinstance(value.ptr, list))
-            assert (value.start + index < len(value.ptr))
-            assert (value.start + index < value.end)
-            value = value.ptr[value.start + index]
-            assert value is not None
-            return value
-        raise NotImplementedError(f"Index expr: {expr.type}")
-    elif isinstance(expr, ValidatedDotExpr):
-        value = get_comptime_value(scope, expr.expr())
-        value = value[expr.name().name]
-        assert value is not None
-        return value
-    elif isinstance(expr, ValidatedComptimeValueExpr):
-        assert expr.value is not None
-        return expr.value
-    else:
-        raise NotImplementedError(expr)
 
 
 def validate_block(parent_scope: Scope, evaluation_allowed: bool, block: ParsedBlock, while_block=False) -> (
@@ -2013,7 +1981,7 @@ def validate_block(parent_scope: Scope, evaluation_allowed: bool, block: ParsedB
         elif isinstance(stmt, ParsedIfStatement):
             validated_stmt, error = validate_if_stmt(scope, evaluation_allowed, stmt)
             if error: return None, error
-            # if can reduce to nothing
+            # 'if' can reduce to nothing
             if not validated_stmt:
                 continue
         elif isinstance(stmt, ParsedAssignment):
@@ -2120,7 +2088,7 @@ def validate_function_definition(scope: Scope, parsed_function_definition: Parse
                                                                                    parsed_function_definition.return_type)
     if error: return None, error
 
-    # once bindings are passed, we monomorphization happened and function becomes complete
+    # if bindings are passed monomorphization is happening
     all_comptime_pars_bound = bindings is not None
     is_incomplete = not parsed_function_definition.is_comptime and any(
         map(lambda par: par.is_comptime, parsed_function_definition.pars)) and not all_comptime_pars_bound
@@ -2203,6 +2171,20 @@ def validate_module(module: ParsedModule) -> (ValidatedModule | None, Validation
         Union[ValidatedFunctionDefinition, ValidatedStructExpr, ValidatedVariableDeclarationStmt]] = []
     module_other_statements: list[
         Union[ValidatedFunctionDefinition, ValidatedStructExpr, ValidatedVariableDeclarationStmt]] = []
+
+
+    """
+    1.
+    
+    @getReturnType() : type {
+    ...
+    }
+    
+    f() : getReturnType() {
+    ...
+    }
+    
+    """
 
     # 1. pure comptime functions
     # 2. mixed
@@ -2399,8 +2381,7 @@ def evaluate_block(block: ValidatedBlock, scope) -> (int, Optional[tuple[Value, 
             status = BLOCK_EXIT_STATUS_BREAK
             break
         elif isinstance(stmt, ValidatedAssignmentStmt):
-            var, _ = scope.lookup_var(stmt.to().name)
-            var.value = do_evaluate_expr(stmt.expr(), scope)
+            comptime_assign(scope, stmt.to(), stmt.expr())
         elif isinstance(stmt, ValidatedWhileStmt):
             while do_evaluate_expr(stmt.condition(), scope):
                 status, (val, typ) = evaluate_block(stmt.block(), scope)
@@ -2450,10 +2431,6 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
 
         if expr_type.is_typeset():
             return CompleteType(NamedType(expr.name))
-
-        func = scope.find_function(expr.name)
-        if func and func.is_comptime:
-            return func
 
         raise NotImplementedError(expr)
 
@@ -2541,10 +2518,16 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
         function_definition = scope.find_function(expr.function_lookup_name)
         execution_scope = scope.get_root_scope().add_child_scope(f'call: {expr.function_lookup_name}')
 
-        for par in function_definition.pars():
-            if not par.is_comptime:
-                raise "Unbound parameter"
-            var = Variable(par.name, par.bound_value, True, VariableType(par.type_expr(), True))
+        args : list[Value] = []
+        for arg in expr.args():
+            val = do_evaluate_expr(arg, scope)
+            assert val is not None
+            args.append(val)
+
+        for par, arg in zip(function_definition.pars(), args):
+            assert par.is_comptime
+            assert par.bound_value is None
+            var = Variable(par.name, arg, True, VariableType(par.type_expr(), True))
             execution_scope.add_var(var)
 
         _, (return_value, _) = evaluate_block(function_definition.body(), execution_scope)
@@ -2669,6 +2652,56 @@ def do_evaluate_expr(expr: ValidatedExpression, scope: Scope) -> Value:
         return CompleteType(Array(length), nxt)
 
     raise NotImplementedError(expr)
+
+
+def comptime_assign(scope: Scope, to_expr: ValidatedExpression, value_expr: ValidatedComptimeValueExpr):
+    if isinstance(to_expr, ValidatedNameExpr):
+        var, _ = scope.lookup_var(to_expr.name)
+        var.value = value_expr.value
+    elif isinstance(to_expr, ValidatedIndexExpr):
+        index = do_evaluate_expr(to_expr.index(), scope)
+        value = get_comptime_value(scope, to_expr.expr())
+        value[index] = value_expr.value
+    elif isinstance(to_expr, ValidatedDotExpr):
+        value = get_comptime_value(scope, to_expr.expr())
+        value[to_expr.name().name] = value_expr.value
+    else:
+        raise NotImplementedError()
+
+
+def get_comptime_value(scope: Scope, expr: ValidatedExpression) -> Value:
+    if isinstance(expr, ValidatedNameExpr):
+        var, _ = scope.lookup_var(expr.name)
+        assert var.value is not None
+        return var.value
+    elif isinstance(expr, ValidatedIndexExpr):
+        index = do_evaluate_expr(expr.index(), scope)
+        value = get_comptime_value(scope, expr.expr())
+        if expr.expr().type.is_array():
+            assert (isinstance(value, list))
+            assert (index < len(value))
+            value = value[index]
+            assert value is not None
+            return value
+        if expr.expr().type.is_slice():
+            assert (isinstance(value, SliceValue))
+            assert (isinstance(value.ptr, list))
+            assert (value.start + index < len(value.ptr))
+            assert (value.start + index < value.end)
+            value = value.ptr[value.start + index]
+            assert value is not None
+            return value
+        raise NotImplementedError(f"Index expr: {expr.type}")
+    elif isinstance(expr, ValidatedDotExpr):
+        value = get_comptime_value(scope, expr.expr())
+        value = value[expr.name().name]
+        assert value is not None
+        return value
+    elif isinstance(expr, ValidatedComptimeValueExpr):
+        assert expr.value is not None
+        return expr.value
+    else:
+        raise NotImplementedError(expr)
 
 
 class Colors:

@@ -1,0 +1,9 @@
+@other() : i32 {
+    tmp := [1, 2, 3]
+    tmp[0] = 2
+    return tmp[0]
+}
+
+main() : i32 {
+    return other()
+}

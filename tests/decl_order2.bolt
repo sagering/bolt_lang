@@ -1,0 +1,12 @@
+r() : i32 {
+    return 42
+}
+
+@c(o : i32) : i32 {
+    return r()
+}
+
+main() : i32 {
+    c()
+    return 0
+}
